@@ -9,6 +9,7 @@ public final class ClientConfig {
     public ChunkFinderSettings chunkFinder = new ChunkFinderSettings();
     public FullbrightSettings fullbright = new FullbrightSettings();
     public FlySettings fly = new FlySettings();
+    public AutoMineSettings autoMine = new AutoMineSettings();
     public int accentColor = 0xC447FF;
     public boolean showHud = true;
 
@@ -27,11 +28,13 @@ public final class ClientConfig {
         if (chunkFinder == null) chunkFinder = new ChunkFinderSettings();
         if (fullbright == null) fullbright = new FullbrightSettings();
         if (fly == null) fly = new FlySettings();
+        if (autoMine == null) autoMine = new AutoMineSettings();
         storage.sanitize();
         spawner.sanitize();
         freecam.sanitize();
         autoBuilder.sanitize();
         chunkFinder.sanitize();
+        autoMine.sanitize();
         accentColor &= 0xFFFFFF;
     }
 }
