@@ -117,7 +117,7 @@ public final class SupportCleanup {
         }
 
         List<BlockPos> candidates=new ArrayList<>(owned);
-        candidates.sort(Comparator.comparingInt(BlockPos::getY).reversed()
+        candidates.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed()
                 .thenComparingDouble(pos->client.player.position().distanceToSqr(pos.getX()+.5,pos.getY()+.5,pos.getZ()+.5)));
         for (BlockPos pos:candidates) {
             if (skipped.contains(pos)) continue;

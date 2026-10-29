@@ -399,7 +399,7 @@ public final class AutoBuilderController {
                 && desired.getValue(LiquidBlock.LEVEL)!=0)
             return "Flowing fluid states must form naturally from source blocks";
         if (FluidPlacement.requiredItem(desired,actual)==Items.WATER_BUCKET
-                && Minecraft.getInstance().level.dimensionType().ultraWarm())
+                && net.minecraft.world.level.Level.NETHER.equals(Minecraft.getInstance().level.dimension()))
             return "Water cannot be placed in this ultrawarm dimension";
         for (var property:desired.getProperties()) {
             if ((property.getName().equals("age") || property.getName().equals("stage"))

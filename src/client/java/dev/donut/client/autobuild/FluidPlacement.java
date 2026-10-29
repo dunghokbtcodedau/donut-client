@@ -41,7 +41,7 @@ public final class FluidPlacement {
         Item item=requiredItem(desired,actual);
         if (item==null || !stack.is(item)) return null;
         boolean water=item==Items.WATER_BUCKET;
-        if (water && client.level.dimensionType().ultraWarm()) return null;
+        if (water && net.minecraft.world.level.Level.NETHER.equals(client.level.dimension())) return null;
         boolean logging=needsWater(desired,actual);
         if (logging && (!(actual.getBlock() instanceof LiquidBlockContainer container)
                 || !container.canPlaceLiquid(client.player,client.level,target,actual,Fluids.WATER))) return null;
