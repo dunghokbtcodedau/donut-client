@@ -14,5 +14,8 @@
     "minecraft": "1.21.11",
     "java": ">=21",
     "fabric-api": ">=0.141.4+1.21.11"
+  },
+  "suggests": {
+    "baritone-meteor": "*"
   }
 }
