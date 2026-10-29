@@ -2,6 +2,7 @@ package dev.donut.client.gui;
 
 import dev.donut.client.config.ClientConfig;
 import dev.donut.client.autobuild.AutoBuilderController;
+import dev.donut.client.automine.AutoMineController;
 import dev.donut.client.fly.FlyController;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -16,13 +17,14 @@ public final class ModuleArrayList {
     public static void render(GuiGraphics graphics, Font font, int screenWidth,
                               ClientConfig config, boolean freecamActive) {
         if (!config.showHud) return;
-        List<String> names = new ArrayList<>(7);
+        List<String> names = new ArrayList<>(8);
         if (config.storage.enabled) names.add("StorageFinder");
         if (config.spawner.enabled) names.add("SpawnerFinder");
         if (config.chunkFinder.enabled) names.add("Base Finder");
         if (config.fullbright.enabled) names.add("Fullbright");
         if (freecamActive) names.add("Freecam");
         if (AutoBuilderController.get().isRunning()) names.add("AutoBuilder");
+        if (AutoMineController.enabled()) names.add("AutoMine");
         if (FlyController.getInstance() != null && FlyController.getInstance().isActive()) names.add("Fly");
         names.sort(Comparator.comparingInt((String name) -> UiPaint.width(font, name)).reversed());
 

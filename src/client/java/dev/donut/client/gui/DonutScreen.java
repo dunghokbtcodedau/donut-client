@@ -6,6 +6,7 @@ import dev.donut.client.config.FinderSettings;
 import dev.donut.client.config.RenderMode;
 import dev.donut.client.input.ModuleKeybinds;
 import dev.donut.client.autobuild.AutoBuilderController;
+import dev.donut.client.automine.AutoMineController;
 import dev.donut.client.fly.FlyController;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.GuiGraphics;
@@ -172,7 +173,8 @@ public final class DonutScreen extends Screen {
         int enabled = (config.storage.enabled ? 1 : 0) + (config.spawner.enabled ? 1 : 0) + (config.freecam.enabled ? 1 : 0)
                 + (AutoBuilderController.get().isRunning() ? 1 : 0) + (config.chunkFinder.enabled ? 1 : 0)
                 + (config.fullbright.enabled ? 1 : 0)
-                + (FlyController.getInstance() != null && FlyController.getInstance().isActive() ? 1 : 0);
+                + (FlyController.getInstance() != null && FlyController.getInstance().isActive() ? 1 : 0)
+                + (AutoMineController.enabled() ? 1 : 0);
         text(g, font, enabled + " / " + ModuleKeybinds.MODULE_COUNT + " active", 43, H - 35, MUTED);
 
         round(g, CX, 8, CW, 30, 7, 0xFF10141A);
@@ -261,7 +263,7 @@ public final class DonutScreen extends Screen {
     }
 
     private boolean matches(int index) {
-        if ((tab == 0 && (index == 3 || index == 6)) || (tab == 3 && index != 3 && index != 6)) return false;
+        if ((tab == 0 && (index == 3 || index == 6 || index == 7)) || (tab == 3 && index != 3 && index != 6 && index != 7)) return false;
         if (tab == 1 && !favorite(index)) return false;
         String words = switch (index) {
             case 0 -> "storagefinder chests trapped ender shulker droppers";
@@ -269,6 +271,7 @@ public final class DonutScreen extends Screen {
             case 2 -> "freecam free camera fly perspective spectator";
             case 4 -> "base finder basefinder chunk finder chunkfinder geode amethyst activity kelp cave vines bamboo cocoa bee nest";
             case 5 -> "fullbright full bright brightness gamma night dark lighting";
+            case 7 -> "automine auto mine baritone ore diamond ancient debris iron gold coal redstone lapis emerald copper quartz dig tunnel";
             case 6 -> "fly flight vanilla singleplayer single player multiplayer multi player lan server movement creative";
             default -> "autobuilder auto builder schematic litematic building materials navigation";
         };
@@ -276,7 +279,7 @@ public final class DonutScreen extends Screen {
     }
 
     private int cardHeight(int index) {
-        int body = index == 6 ? 147 : index == 5 ? 57 : index == 4 ? 358 : index == 3 ? 112 : index == 2 ? 213 : 282 + colorHeight(index) + filterHeight(index);
+        int body = index == 7 ? 392 : index == 6 ? 147 : index == 5 ? 57 : index == 4 ? 358 : index == 3 ? 112 : index == 2 ? 213 : 282 + colorHeight(index) + filterHeight(index);
         return CARD_HEADER + (int) Math.round(body * smooth(expansion[index]));
     }
 
@@ -321,7 +324,8 @@ public final class DonutScreen extends Screen {
         rowX = x + 11;
         rowW = CARD_W - 22;
         rowPrefix = "m" + index + ".";
-        if (index == 6) drawFlySettings(g, y + CARD_HEADER + 10);
+        if (index == 7) drawAutoMineSettings(g, y + CARD_HEADER + 10);
+        else if (index == 6) drawFlySettings(g, y + CARD_HEADER + 10);
         else if (index == 5) drawFullbrightSettings(g, y + CARD_HEADER + 10);
         else if (index == 4) drawChunkFinderSettings(g, y + CARD_HEADER + 10);
         else if (index == 3) drawAutoBuilderSettings(g, y + CARD_HEADER + 10);
@@ -335,10 +339,11 @@ public final class DonutScreen extends Screen {
     }
 
     private FinderSettings settings(int index) { return index == 0 ? config.storage : config.spawner; }
-    private boolean enabled(int index) { return index == 6 ? FlyController.enabled() : index == 5 ? config.fullbright.enabled : index == 4 ? config.chunkFinder.enabled : index == 3 ? AutoBuilderController.get().isRunning() : index == 2 ? config.freecam.enabled : settings(index).enabled; }
-    private boolean favorite(int index) { return index == 6 ? config.fly.favorite : index == 5 ? config.fullbright.favorite : index == 4 ? config.chunkFinder.favorite : index == 3 ? config.autoBuilder.favorite : index == 2 ? config.freecam.favorite : settings(index).favorite; }
+    private boolean enabled(int index) { return index == 7 ? AutoMineController.enabled() : index == 6 ? FlyController.enabled() : index == 5 ? config.fullbright.enabled : index == 4 ? config.chunkFinder.enabled : index == 3 ? AutoBuilderController.get().isRunning() : index == 2 ? config.freecam.enabled : settings(index).enabled; }
+    private boolean favorite(int index) { return index == 7 ? config.autoMine.favorite : index == 6 ? config.fly.favorite : index == 5 ? config.fullbright.favorite : index == 4 ? config.chunkFinder.favorite : index == 3 ? config.autoBuilder.favorite : index == 2 ? config.freecam.favorite : settings(index).favorite; }
     private void toggleFavorite(int index) {
-        if (index == 6) config.fly.favorite = !config.fly.favorite;
+        if (index == 7) config.autoMine.favorite = !config.autoMine.favorite;
+        else if (index == 6) config.fly.favorite = !config.fly.favorite;
         else if (index == 5) config.fullbright.favorite = !config.fullbright.favorite;
         else if (index == 4) config.chunkFinder.favorite = !config.chunkFinder.favorite;
         else if (index == 3) config.autoBuilder.favorite = !config.autoBuilder.favorite;
@@ -347,7 +352,10 @@ public final class DonutScreen extends Screen {
         if (tab == 1) contentProgress = 0;
     }
     private void toggleEnabled(int index) {
-        if (index == 6) {
+        if (index == 7) {
+            AutoMineController controller = AutoMineController.getInstance();
+            if (controller != null) controller.setEnabled(!AutoMineController.enabled());
+        } else if (index == 6) {
             FlyController controller = FlyController.getInstance();
             if (controller != null) controller.setEnabled(!FlyController.enabled());
         } else if (index == 5) {
@@ -363,7 +371,29 @@ public final class DonutScreen extends Screen {
         } else change(() -> settings(index).enabled = !settings(index).enabled);
     }
     private String name(int index) {
-        return switch (index) { case 0 -> "StorageFinder"; case 1 -> "SpawnerFinder"; case 2 -> "Freecam"; case 4 -> "Base Finder"; case 5 -> "Fullbright"; case 6 -> "Fly"; default -> "AutoBuilder"; };
+        return switch (index) { case 0 -> "StorageFinder"; case 1 -> "SpawnerFinder"; case 2 -> "Freecam"; case 4 -> "Base Finder"; case 5 -> "Fullbright"; case 6 -> "Fly"; case 7 -> "AutoMine"; default -> "AutoBuilder"; };
+    }
+
+    private void drawAutoMineSettings(GuiGraphics g, int y) {
+        var s = config.autoMine;
+        section(g, "BLOCKS", y); y += 17;
+        settingToggle(g, "mineDiamond", "Diamond", y, () -> s.diamond, () -> s.diamond = !s.diamond); y += 23;
+        settingToggle(g, "mineDebris", "Ancient debris", y, () -> s.ancientDebris, () -> s.ancientDebris = !s.ancientDebris); y += 23;
+        settingToggle(g, "mineIron", "Iron", y, () -> s.iron, () -> s.iron = !s.iron); y += 23;
+        settingToggle(g, "mineGold", "Gold", y, () -> s.gold, () -> s.gold = !s.gold); y += 23;
+        settingToggle(g, "mineCoal", "Coal", y, () -> s.coal, () -> s.coal = !s.coal); y += 23;
+        settingToggle(g, "mineRedstone", "Redstone", y, () -> s.redstone, () -> s.redstone = !s.redstone); y += 23;
+        settingToggle(g, "mineLapis", "Lapis", y, () -> s.lapis, () -> s.lapis = !s.lapis); y += 23;
+        settingToggle(g, "mineEmerald", "Emerald", y, () -> s.emerald, () -> s.emerald = !s.emerald); y += 23;
+        settingToggle(g, "mineCopper", "Copper", y, () -> s.copper, () -> s.copper = !s.copper); y += 23;
+        settingToggle(g, "mineQuartz", "Nether quartz", y, () -> s.quartz, () -> s.quartz = !s.quartz); y += 27;
+        section(g, "REJECTED BLOCKS", y); y += 17;
+        settingToggle(g, "mineRetry", "Retry rejected blocks", y, () -> s.retryRejected, () -> s.retryRejected = !s.retryRejected); y += 25;
+        slider(g, "mineRetryLimit", "Retries (0 = no limit)", y, () -> s.retryLimit,
+                value -> s.retryLimit = (int) value, 0, 200, 1, ""); y += 30;
+        slider(g, "mineQuantity", "Mine count (0 = no limit)", y, () -> s.quantity,
+                value -> s.quantity = (int) value, 0, 512, 8, ""); y += 30;
+        text(g, font, ellipsize(AutoMineController.baritoneInstalled() ? s.status : "Baritone (baritone-meteor) is not installed", rowW), rowX, y, MUTED);
     }
 
     private void drawFlySettings(GuiGraphics g, int y) {
