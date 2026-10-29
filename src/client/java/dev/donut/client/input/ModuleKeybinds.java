@@ -11,7 +11,7 @@ import java.util.Set;
 
 /** The click GUI edits the same mappings exposed in Minecraft's Controls screen. */
 public final class ModuleKeybinds {
-    public static final int MODULE_COUNT = 7;
+    public static final int MODULE_COUNT = 8;
     private static final KeyMapping[] MODULES = new KeyMapping[MODULE_COUNT];
     private static final boolean[] pressed = new boolean[MODULE_COUNT];
     private static final Set<InputConstants.Key> heldInputs = new HashSet<>();
@@ -40,6 +40,13 @@ public final class ModuleKeybinds {
     public static void initialize(KeyMapping storage, KeyMapping spawner, KeyMapping freecam,
                                   KeyMapping autoBuilder, KeyMapping chunkFinder, KeyMapping fullbright,
                                   KeyMapping fly) {
+        initialize(storage, spawner, freecam, autoBuilder, chunkFinder, fullbright, fly, null);
+    }
+
+    public static void initialize(KeyMapping storage, KeyMapping spawner, KeyMapping freecam,
+                                  KeyMapping autoBuilder, KeyMapping chunkFinder, KeyMapping fullbright,
+                                  KeyMapping fly, KeyMapping autoMine) {
+        MODULES[7] = autoMine;
         MODULES[0] = storage;
         MODULES[1] = spawner;
         MODULES[2] = freecam;
