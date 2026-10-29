@@ -13,6 +13,7 @@ import dev.donut.client.gui.ModuleArrayList;
 import dev.donut.client.input.ModuleKeybinds;
 import dev.donut.client.render.HighlightRenderer;
 import dev.donut.client.autobuild.AutoBuilderController;
+import dev.donut.client.automine.AutoMineController;
 import dev.donut.client.gui.AutoBuilderScreen;
 import dev.donut.client.gui.AutoBuilderHud;
 import net.fabricmc.api.ClientModInitializer;
@@ -57,6 +58,8 @@ public final class DonutClient implements ClientModInitializer {
         ServerTickEvents.START_SERVER_TICK.register(fly::serverTick);
         ServerLifecycleEvents.SERVER_STOPPING.register(fly::serverStopping);
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> fly.serverDisconnected(server, handler.player));
+        AutoMineController autoMine = new AutoMineController(config);
+        ClientTickEvents.END_CLIENT_TICK.register(autoMine::tick);
         AutoBuilderController autoBuilder = AutoBuilderController.get();
         ClientTickEvents.START_CLIENT_TICK.register(autoBuilder::tick);
         HighlightRenderer renderer = new HighlightRenderer(config, scanner, chunkScanner);
@@ -71,7 +74,8 @@ public final class DonutClient implements ClientModInitializer {
         KeyMapping chunks = bind("toggle_chunk_finder", InputConstants.UNKNOWN.getValue(), category);
         KeyMapping bright = bind("toggle_fullbright", InputConstants.UNKNOWN.getValue(), category);
         KeyMapping flight = bind("toggle_fly", InputConstants.UNKNOWN.getValue(), category);
-        ModuleKeybinds.initialize(storage, spawner, camera, builder, chunks, bright, flight);
+        KeyMapping mine = bind("toggle_automine", InputConstants.UNKNOWN.getValue(), category);
+        ModuleKeybinds.initialize(storage, spawner, camera, builder, chunks, bright, flight, mine);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             boolean inputBlocked = ModuleKeybinds.inputBlocked(client);
@@ -106,6 +110,9 @@ public final class DonutClient implements ClientModInitializer {
             if (ModuleKeybinds.consumePress(client, 6)) {
                 if (!inputBlocked && client.screen == null && client.player != null) fly.setEnabled(!fly.isActive());
             }
+            if (ModuleKeybinds.consumePress(client, 7)) {
+                if (!inputBlocked && client.screen == null && client.player != null) autoMine.setEnabled(!autoMine.isActive());
+            }
             fly.tick(client);
             scanner.tick(client);
             chunkScanner.tick(client);
@@ -126,12 +133,13 @@ public final class DonutClient implements ClientModInitializer {
             AutoBuilderHud.render(graphics, client.font, client.getWindow().getGuiScaledHeight(), config);
         });
 
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> { scanner.clear(); chunkScanner.clear(); freecam.disable(); fly.clientDisconnected(handler, client); autoBuilder.disconnect(); });
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> { scanner.clear(); chunkScanner.clear(); freecam.disable(); fly.clientDisconnected(handler, client); autoBuilder.disconnect(); autoMine.disconnect(); });
         ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
             fullbright.close();
             freecam.disable();
             fly.disable();
             autoBuilder.disconnect();
+            autoMine.disconnect();
             save();
             renderer.close();
         });
