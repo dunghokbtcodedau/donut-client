@@ -7,5 +7,6 @@
   "key.donut.open_autobuilder": "Open AutoBuilder",
   "key.donut.toggle_chunk_finder": "Toggle Base Finder",
   "key.donut.toggle_fullbright": "Toggle Fullbright",
-  "key.donut.toggle_fly": "Toggle Fly"
+  "key.donut.toggle_fly": "Toggle Fly",
+  "key.donut.toggle_automine": "Toggle AutoMine"
 }
