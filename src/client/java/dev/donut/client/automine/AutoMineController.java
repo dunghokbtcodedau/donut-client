@@ -21,12 +21,17 @@ import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Lets Baritone mine the selected ores and watches every block it breaks. A break counts as accepted only once the
+ * Two modes. Ore mode lets Baritone mine the selected ores. Area mode digs the rectangle between point 1 and
+ * point 2: it first walks to the block that was left half-dug (or, on a fresh start, to the nearest corner) and
+ * only then lets Baritone clear the whole area.
+ *
+ * Ore mode: lets Baritone mine the selected ores and watches every block it breaks. A break counts as accepted only once the
  * block stays gone for a few ticks. If the server puts it back, Baritone is paused and this controller keeps
  * hitting that exact block until the server accepts the break, then hands control back to Baritone.
  */
@@ -36,6 +41,11 @@ public final class AutoMineController {
 
     private static final int WATCH_TIMEOUT = 400;
     private static final int HAMMER_RESTART = 600;
+    private static final long MAX_AREA_VOLUME = 2_000_000L;
+    private static final int GOTO_TIMEOUT = 20 * 120;
+    private static final int GOTO_RANGE = 3;
+
+    private enum Phase { GOTO, DIG }
 
     private final ClientConfig config;
     private final Map<BlockPos, Watch> watches = new HashMap<>();
@@ -46,6 +56,13 @@ public final class AutoMineController {
     private long tick;
     private long graceUntil;
     private int mined;
+    private Phase phase = Phase.GOTO;
+    private BlockPos gotoTarget;
+    private BlockPos lastDig;
+    private long phaseStart;
+    private int gotoAttempts;
+    private int digRestarts;
+    private boolean gotoIssued;
 
     private static final class Watch {
         final Block block;
@@ -81,7 +98,10 @@ public final class AutoMineController {
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null || mc.gameMode == null) { s.status = "Join a world first"; return; }
         if (!baritoneInstalled()) { s.status = "Install Baritone (baritone-meteor) to use AutoMine"; say(mc, s.status); return; }
-        if (s.blockNames().isEmpty()) { s.status = "Pick at least one block to mine"; say(mc, s.status); return; }
+        if (s.areaMode) {
+            if (!s.areaReady()) { s.status = "Set point 1 and point 2 first"; say(mc, s.status); return; }
+            if (s.areaVolume() > MAX_AREA_VOLUME) { s.status = "Area is too large (max " + MAX_AREA_VOLUME + " blocks)"; say(mc, s.status); return; }
+        } else if (s.blockNames().isEmpty()) { s.status = "Pick at least one block to mine"; say(mc, s.status); return; }
         s.enabled = true;
         running = true;
         resume = true;
@@ -89,7 +109,31 @@ public final class AutoMineController {
         hammer = null;
         watches.clear();
         attempts.clear();
+        phase = Phase.GOTO;
+        gotoTarget = null;
+        gotoIssued = false;
+        gotoAttempts = 0;
+        digRestarts = 0;
         s.status = "Starting Baritone";
+    }
+
+    /** Stores the block the player looks at (or stands on) as point 1 (index 1) or point 2 (index 2). */
+    public void setPoint(int index) {
+        Minecraft mc = Minecraft.getInstance();
+        AutoMineSettings s = config.autoMine;
+        if (mc.player == null || mc.level == null) { s.status = "Join a world first"; return; }
+        BlockPos pos = mc.player.blockPosition().below();
+        if (mc.hitResult != null && mc.hitResult.getType() == HitResult.Type.BLOCK) pos = ((BlockHitResult) mc.hitResult).getBlockPos();
+        if (index == 1) s.setPoint1(pos.getX(), pos.getY(), pos.getZ()); else s.setPoint2(pos.getX(), pos.getY(), pos.getZ());
+        lastDig = null;
+        s.status = "Point " + index + " = " + pos.toShortString();
+        say(mc, s.status);
+    }
+
+    public void clearPoints() {
+        config.autoMine.clearPoints();
+        lastDig = null;
+        config.autoMine.status = "Points cleared";
     }
 
     /** Called when leaving a world or closing the game. */
@@ -117,6 +161,7 @@ public final class AutoMineController {
         tick++;
         try {
             if (hammer != null) { tickHammer(mc, player, level); return; }
+            if (s.areaMode) { tickArea(mc, player, level); return; }
             if (resume) {
                 resume = false;
                 int remaining = s.quantity > 0 ? s.quantity - mined : 0;
@@ -135,6 +180,122 @@ public final class AutoMineController {
         }
     }
 
+    // ---------------------------------------------------------------- area mode
+
+    private void tickArea(Minecraft mc, LocalPlayer player, ClientLevel level) {
+        AutoMineSettings s = config.autoMine;
+        BlockPos a = new BlockPos(s.p1x, s.p1y, s.p1z);
+        BlockPos b = new BlockPos(s.p2x, s.p2y, s.p2z);
+        if (phase == Phase.GOTO) {
+            if (!gotoIssued) {
+                gotoTarget = chooseStart(player, level, s);
+                if (gotoTarget == null) { startDig(s, a, b); return; }
+                if (isNear(player, gotoTarget)) { startDig(s, a, b); return; }
+                BaritoneLink.goTo(gotoTarget, GOTO_RANGE);
+                gotoIssued = true;
+                graceUntil = tick + 10;
+                phaseStart = tick;
+                s.status = (lastDigStillValid(level, s) ? "Going to the half-dug block " : "Going to the corner ") + gotoTarget.toShortString();
+            } else if (isNear(player, gotoTarget)) {
+                startDig(s, a, b);
+            } else if (tick - phaseStart > GOTO_TIMEOUT) {
+                startDig(s, a, b); // Baritone will walk there itself while digging
+            } else if (tick > graceUntil && !BaritoneLink.goToActive()) {
+                if (++gotoAttempts >= 3) startDig(s, a, b);
+                else gotoIssued = false; // path ended early, plan again
+            }
+            return;
+        }
+        if (resume) {
+            resume = false;
+            BaritoneLink.clearArea(a, b);
+            graceUntil = tick + 20;
+            s.status = "Digging area";
+        } else if (tick > graceUntil && !BaritoneLink.builderActive()) {
+            int left = remaining(level, s);
+            if (left == 0) {
+                stop("Finished: area cleared");
+                say(mc, "AutoMine finished: the area is clear.");
+                return;
+            }
+            if (++digRestarts > 5) {
+                stop("Baritone cannot reach the last " + left + " blocks");
+                say(mc, "AutoMine stopped: " + left + " blocks could not be dug.");
+                return;
+            }
+            BaritoneLink.clearArea(a, b);
+            graceUntil = tick + 20;
+            s.status = "Digging area";
+        }
+        observe(mc, level);
+    }
+
+    private void startDig(AutoMineSettings s, BlockPos a, BlockPos b) {
+        try { BaritoneLink.cancel(); } catch (RuntimeException | LinkageError ignored) { }
+        phase = Phase.DIG;
+        gotoTarget = null;
+        gotoIssued = false;
+        BaritoneLink.clearArea(a, b);
+        graceUntil = tick + 20;
+        s.status = "Digging area";
+    }
+
+    /** The block that was being dug when AutoMine stopped, otherwise the nearest corner that still has blocks. */
+    private BlockPos chooseStart(LocalPlayer player, ClientLevel level, AutoMineSettings s) {
+        if (lastDigStillValid(level, s)) return lastDig;
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        int[] xs = {s.minX(), s.maxX()};
+        int[] zs = {s.minZ(), s.maxZ()};
+        for (int x : xs) {
+            for (int z : zs) {
+                for (int y = s.maxY(); y >= s.minY(); y--) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (!diggable(level, pos, level.getBlockState(pos))) continue;
+                    double d = player.position().distanceToSqr(Vec3.atCenterOf(pos));
+                    if (d < bestDist) { bestDist = d; best = pos; }
+                    break; // highest solid block of this corner column
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean lastDigStillValid(ClientLevel level, AutoMineSettings s) {
+        return lastDig != null && inArea(s, lastDig) && diggable(level, lastDig, level.getBlockState(lastDig));
+    }
+
+    private static boolean isNear(LocalPlayer player, BlockPos target) {
+        double reach = GOTO_RANGE + 1.5;
+        return player.position().distanceToSqr(Vec3.atCenterOf(target)) <= reach * reach;
+    }
+
+    private static boolean inArea(AutoMineSettings s, BlockPos p) {
+        return p.getX() >= s.minX() && p.getX() <= s.maxX()
+                && p.getY() >= s.minY() && p.getY() <= s.maxY()
+                && p.getZ() >= s.minZ() && p.getZ() <= s.maxZ();
+    }
+
+    private static boolean diggable(ClientLevel level, BlockPos pos, BlockState state) {
+        return !state.isAir() && state.getFluidState().isEmpty() && state.getDestroySpeed(level, pos) >= 0;
+    }
+
+    /** Blocks still to dig in the area. Unloaded chunks count as unfinished so the job is never declared done early. */
+    private int remaining(ClientLevel level, AutoMineSettings s) {
+        int count = 0;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        for (int x = s.minX(); x <= s.maxX(); x++) {
+            for (int z = s.minZ(); z <= s.maxZ(); z++) {
+                if (level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, false) == null) { count++; continue; }
+                for (int y = s.minY(); y <= s.maxY(); y++) {
+                    pos.set(x, y, z);
+                    if (diggable(level, pos, level.getBlockState(pos))) count++;
+                }
+            }
+        }
+        return count;
+    }
+
     // ---------------------------------------------------------------- watching Baritone's breaks
 
     private void observe(Minecraft mc, ClientLevel level) {
@@ -143,6 +304,7 @@ public final class AutoMineController {
             BlockPos pos = ((BlockHitResult) mc.hitResult).getBlockPos();
             BlockState state = level.getBlockState(pos);
             // Falling blocks legitimately re-form in the hole they leave, so they cannot be judged this way.
+            if (s.areaMode && inArea(s, pos) && diggable(level, pos, state)) lastDig = pos.immutable();
             if (!state.isAir() && !(state.getBlock() instanceof FallingBlock) && !watches.containsKey(pos)) {
                 watches.put(pos.immutable(), new Watch(state.getBlock(), tick));
             }
