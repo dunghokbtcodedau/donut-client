@@ -56,4 +56,23 @@ class AutoMineSettingsTest {
         assertFalse(names.contains("diamond_ore"));
         assertEquals(2, s.customBlocks.size());
     }
+
+    @Test
+    void areaIsNormalisedFromAnyTwoCorners() {
+        AutoMineSettings s = new AutoMineSettings();
+        assertTrue(s.areaMode);
+        assertFalse(s.areaReady());
+        s.setPoint1(10, 64, -5);
+        s.setPoint2(2, 60, 3);
+        assertTrue(s.areaReady());
+        assertEquals(2, s.minX());
+        assertEquals(10, s.maxX());
+        assertEquals(60, s.minY());
+        assertEquals(64, s.maxY());
+        assertEquals(-5, s.minZ());
+        assertEquals(3, s.maxZ());
+        assertEquals(9L * 5 * 9, s.areaVolume());
+        s.clearPoints();
+        assertEquals(0, s.areaVolume());
+    }
 }
