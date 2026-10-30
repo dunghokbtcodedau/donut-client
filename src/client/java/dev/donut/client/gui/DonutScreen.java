@@ -271,7 +271,7 @@ public final class DonutScreen extends Screen {
             case 2 -> "freecam free camera fly perspective spectator";
             case 4 -> "base finder basefinder chunk finder chunkfinder geode amethyst activity kelp cave vines bamboo cocoa bee nest";
             case 5 -> "fullbright full bright brightness gamma night dark lighting";
-            case 7 -> "automine auto mine baritone ore diamond ancient debris iron gold coal redstone lapis emerald copper quartz dig tunnel";
+            case 7 -> "automine auto mine baritone area square point region clear ore diamond ancient debris iron gold coal redstone lapis emerald copper quartz dig tunnel";
             case 6 -> "fly flight vanilla singleplayer single player multiplayer multi player lan server movement creative";
             default -> "autobuilder auto builder schematic litematic building materials navigation";
         };
@@ -279,7 +279,7 @@ public final class DonutScreen extends Screen {
     }
 
     private int cardHeight(int index) {
-        int body = index == 7 ? 392 : index == 6 ? 147 : index == 5 ? 57 : index == 4 ? 358 : index == 3 ? 112 : index == 2 ? 213 : 282 + colorHeight(index) + filterHeight(index);
+        int body = index == 7 ? (config.autoMine.areaMode ? 262 : 434) : index == 6 ? 147 : index == 5 ? 57 : index == 4 ? 358 : index == 3 ? 112 : index == 2 ? 213 : 282 + colorHeight(index) + filterHeight(index);
         return CARD_HEADER + (int) Math.round(body * smooth(expansion[index]));
     }
 
@@ -376,24 +376,51 @@ public final class DonutScreen extends Screen {
 
     private void drawAutoMineSettings(GuiGraphics g, int y) {
         var s = config.autoMine;
-        section(g, "BLOCKS", y); y += 17;
-        settingToggle(g, "mineDiamond", "Diamond", y, () -> s.diamond, () -> s.diamond = !s.diamond); y += 23;
-        settingToggle(g, "mineDebris", "Ancient debris", y, () -> s.ancientDebris, () -> s.ancientDebris = !s.ancientDebris); y += 23;
-        settingToggle(g, "mineIron", "Iron", y, () -> s.iron, () -> s.iron = !s.iron); y += 23;
-        settingToggle(g, "mineGold", "Gold", y, () -> s.gold, () -> s.gold = !s.gold); y += 23;
-        settingToggle(g, "mineCoal", "Coal", y, () -> s.coal, () -> s.coal = !s.coal); y += 23;
-        settingToggle(g, "mineRedstone", "Redstone", y, () -> s.redstone, () -> s.redstone = !s.redstone); y += 23;
-        settingToggle(g, "mineLapis", "Lapis", y, () -> s.lapis, () -> s.lapis = !s.lapis); y += 23;
-        settingToggle(g, "mineEmerald", "Emerald", y, () -> s.emerald, () -> s.emerald = !s.emerald); y += 23;
-        settingToggle(g, "mineCopper", "Copper", y, () -> s.copper, () -> s.copper = !s.copper); y += 23;
-        settingToggle(g, "mineQuartz", "Nether quartz", y, () -> s.quartz, () -> s.quartz = !s.quartz); y += 27;
+        AutoMineController controller = AutoMineController.getInstance();
+        section(g, "MODE", y); y += 17;
+        settingToggle(g, "mineArea", "Dig a square area", y, () -> s.areaMode, () -> s.areaMode = !s.areaMode); y += 25;
+        if (s.areaMode) {
+            section(g, "AREA", y); y += 17;
+            int half = (rowW - 6) / 2;
+            actionButton(g, "mineP1", "Set point 1", rowX, y, half, () -> { if (controller != null) controller.setPoint(1); });
+            actionButton(g, "mineP2", "Set point 2", rowX + half + 6, y, half, () -> { if (controller != null) controller.setPoint(2); });
+            y += 29;
+            text(g, font, s.hasPoint1 ? "Point 1: " + s.p1x + ", " + s.p1y + ", " + s.p1z : "Point 1: not set", rowX, y, s.hasPoint1 ? TEXT : DIM); y += 15;
+            text(g, font, s.hasPoint2 ? "Point 2: " + s.p2x + ", " + s.p2y + ", " + s.p2z : "Point 2: not set", rowX, y, s.hasPoint2 ? TEXT : DIM); y += 15;
+            String size = s.areaReady()
+                    ? "Size: " + (s.maxX() - s.minX() + 1) + " x " + (s.maxY() - s.minY() + 1) + " x " + (s.maxZ() - s.minZ() + 1) + " (" + s.areaVolume() + " blocks)"
+                    : "Look at a block (or stand on it) and press Set point";
+            text(g, font, ellipsize(size, rowW), rowX, y, MUTED); y += 17;
+            actionButton(g, "mineClear", "Clear points", rowX, y, rowW, () -> { if (controller != null) controller.clearPoints(); });
+            y += 29;
+        } else {
+            section(g, "BLOCKS", y); y += 17;
+            settingToggle(g, "mineDiamond", "Diamond", y, () -> s.diamond, () -> s.diamond = !s.diamond); y += 23;
+            settingToggle(g, "mineDebris", "Ancient debris", y, () -> s.ancientDebris, () -> s.ancientDebris = !s.ancientDebris); y += 23;
+            settingToggle(g, "mineIron", "Iron", y, () -> s.iron, () -> s.iron = !s.iron); y += 23;
+            settingToggle(g, "mineGold", "Gold", y, () -> s.gold, () -> s.gold = !s.gold); y += 23;
+            settingToggle(g, "mineCoal", "Coal", y, () -> s.coal, () -> s.coal = !s.coal); y += 23;
+            settingToggle(g, "mineRedstone", "Redstone", y, () -> s.redstone, () -> s.redstone = !s.redstone); y += 23;
+            settingToggle(g, "mineLapis", "Lapis", y, () -> s.lapis, () -> s.lapis = !s.lapis); y += 23;
+            settingToggle(g, "mineEmerald", "Emerald", y, () -> s.emerald, () -> s.emerald = !s.emerald); y += 23;
+            settingToggle(g, "mineCopper", "Copper", y, () -> s.copper, () -> s.copper = !s.copper); y += 23;
+            settingToggle(g, "mineQuartz", "Nether quartz", y, () -> s.quartz, () -> s.quartz = !s.quartz); y += 27;
+        }
         section(g, "REJECTED BLOCKS", y); y += 17;
         settingToggle(g, "mineRetry", "Retry rejected blocks", y, () -> s.retryRejected, () -> s.retryRejected = !s.retryRejected); y += 25;
         slider(g, "mineRetryLimit", "Retries (0 = no limit)", y, () -> s.retryLimit,
                 value -> s.retryLimit = (int) value, 0, 200, 1, ""); y += 30;
-        slider(g, "mineQuantity", "Mine count (0 = no limit)", y, () -> s.quantity,
-                value -> s.quantity = (int) value, 0, 512, 8, ""); y += 30;
+        if (!s.areaMode) {
+            slider(g, "mineQuantity", "Mine count (0 = no limit)", y, () -> s.quantity,
+                    value -> s.quantity = (int) value, 0, 512, 8, ""); y += 30;
+        }
         text(g, font, ellipsize(AutoMineController.baritoneInstalled() ? s.status : "Baritone (baritone-meteor) is not installed", rowW), rowX, y, MUTED);
+    }
+
+    private void actionButton(GuiGraphics g, String id, String label, int x, int y, int w, Runnable action) {
+        round(g, x, y, w, 22, 5, blend(CARD, config.accentColor, .28));
+        text(g, font, label, x + (w - UiPaint.width(font, label)) / 2, y + 7, TEXT);
+        hit(rowPrefix + id, x, y, w, 22, () -> change(action));
     }
 
     private void drawFlySettings(GuiGraphics g, int y) {
