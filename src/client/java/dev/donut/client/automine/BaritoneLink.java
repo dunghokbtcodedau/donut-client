@@ -1,8 +1,10 @@
 package dev.donut.client.automine;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
+import net.minecraft.core.BlockPos;
 
 /**
  * Talks to Baritone through reflection, so Donut Client needs no Baritone jar to compile or to start. Only
@@ -12,6 +14,8 @@ import java.util.List;
 final class BaritoneLink {
     private static Method getProvider, getPrimary, getMineProcess, mineByName, isActive, cancelMine;
     private static Method getPathing, cancelEverything;
+    private static Method getBuilderProcess, clearArea, getCustomGoalProcess, setGoalAndPath, processActive;
+    private static Constructor<?> goalNear;
 
     private BaritoneLink() { }
 
@@ -29,6 +33,16 @@ final class BaritoneLink {
         isActive = mine.getMethod("isActive");
         cancelMine = mine.getMethod("cancel");
         cancelEverything = pathing.getMethod("cancelEverything");
+        Class<?> builder = Class.forName("baritone.api.process.IBuilderProcess");
+        Class<?> custom = Class.forName("baritone.api.process.ICustomGoalProcess");
+        Class<?> process = Class.forName("baritone.api.process.IBaritoneProcess");
+        Class<?> goal = Class.forName("baritone.api.pathing.goals.Goal");
+        getBuilderProcess = baritone.getMethod("getBuilderProcess");
+        getCustomGoalProcess = baritone.getMethod("getCustomGoalProcess");
+        clearArea = builder.getMethod("clearArea", BlockPos.class, BlockPos.class);
+        setGoalAndPath = custom.getMethod("setGoalAndPath", goal);
+        processActive = process.getMethod("isActive");
+        goalNear = Class.forName("baritone.api.pathing.goals.GoalNear").getConstructor(BlockPos.class, int.class);
         mineByName = mine.getMethod("mineByName", int.class, String[].class);
     }
 
@@ -70,6 +84,45 @@ final class BaritoneLink {
             Object baritone = baritone();
             call(cancelMine, call(getMineProcess, baritone));
             call(cancelEverything, call(getPathing, baritone));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Baritone API not found: " + e, e);
+        }
+    }
+
+    /** Digs every block between the two corners (inclusive). Baritone picks up wherever the world was left. */
+    static void clearArea(BlockPos a, BlockPos b) {
+        try {
+            bind();
+            call(clearArea, call(getBuilderProcess, baritone()), a, b);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Baritone API not found: " + e, e);
+        }
+    }
+
+    /** Walks to within {@code range} blocks of the position. */
+    static void goTo(BlockPos pos, int range) {
+        try {
+            bind();
+            Object goal = goalNear.newInstance(pos, range);
+            call(setGoalAndPath, call(getCustomGoalProcess, baritone()), goal);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Baritone API not found: " + e, e);
+        }
+    }
+
+    static boolean builderActive() {
+        try {
+            bind();
+            return (Boolean) call(processActive, call(getBuilderProcess, baritone()));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Baritone API not found: " + e, e);
+        }
+    }
+
+    static boolean goToActive() {
+        try {
+            bind();
+            return (Boolean) call(processActive, call(getCustomGoalProcess, baritone()));
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Baritone API not found: " + e, e);
         }
