@@ -62,6 +62,14 @@ public final class AutoBuilderController {
     private boolean pendingSetHome;
     private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
     private final BucketRestock restock = new BucketRestock();
+    // End of a layer: walk to a spot above it, /sethome, break the temporary supports, /home back.
+    private enum Wrap { NONE, WALK, SETHOME, CLEAN, HOME }
+    private Wrap wrap = Wrap.NONE;
+    private int wrapLayer, wrapStart, wrapUntil, wrapStuck;
+    private BlockPos wrapCell;
+    private int homeSetLayer = Integer.MIN_VALUE;
+    private boolean wrapHomeSet, wrapSent, wrapHadSupports, justFell, relaxAbove;
+    private net.minecraft.world.phys.Vec3 wrapFrom;
     private int restockFails;
     private double groundY = Double.NaN;
     private int lastFallTick = -100000;
@@ -97,7 +105,8 @@ public final class AutoBuilderController {
         pillar = null; layerY = Integer.MIN_VALUE; homeLayer = Integer.MIN_VALUE; pendingSetHome = false; setHomeUntil = -1;
         progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
         homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
-        groundY = Double.NaN; lastFallTick = -100000;
+        groundY = Double.NaN; lastFallTick = -100000; justFell = false;
+        wrap = Wrap.NONE; wrapCell = null; relaxAbove = false; homeSetLayer = Integer.MIN_VALUE;
         LavaGuard.setPlannedLayer(Integer.MIN_VALUE);
     }
     public Schematic schematic() { return schematic; }
@@ -337,7 +346,7 @@ public final class AutoBuilderController {
     }
     public void cancel() {
         saveProgress();
-        restock.reset(); restockFails=0;
+        restock.reset(); restockFails=0; wrap=Wrap.NONE; wrapCell=null;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
         failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
@@ -372,7 +381,8 @@ public final class AutoBuilderController {
         if (client.player.isUsingItem()) { pauseWith("Finish using the held item, then Resume."); return; }
         trackFall(client);
         if (lavaEscape(client)) return;
-        if (restock.active()) { restockTick(client); return; }
+        if (restock.active()) { justFell=false; restockTick(client); return; }
+        if (justFell) { justFell=false; if (wrap==Wrap.NONE && homeAfterFall(client)) return; }
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
         if (scanned) revalidate(client,256);
@@ -422,11 +432,14 @@ public final class AutoBuilderController {
             }
             return;
         }
+        if (wrap != Wrap.NONE && wrapTick(client)) return;
+        if (settings.autoSetHome && layerY!=Integer.MIN_VALUE && homeSetLayer!=layerY && setHomeAbove(client)) return;
         cleanup.reset(client);
         finalCheckIndex=0;
-        if (pendingSetHome && trySetHome(client)) return;
+        navigator.minStandY=settings.alwaysAbove && !relaxAbove && layerY!=Integer.MIN_VALUE ? layerY+1 : Integer.MIN_VALUE;
         if (pillar != null && pillarTick(client)) return;
-        if (current == null) current=chooseTarget(client);
+        if (current == null) { relaxAbove=false; current=chooseTarget(client); }
+        if (wrap != Wrap.NONE) { current=null; return; } // a layer just ended: wrap it up first
         if (current == null) {
             pauseWith(lastFailure.isEmpty() ? "No placeable blocks remain. Check unloaded areas, supports and occupied positions." : lastFailure);
             return;
@@ -471,7 +484,10 @@ public final class AutoBuilderController {
             cooldown=2; reason="Moving material into the hotbar..."; return;
         }
         client.player.getInventory().setSelectedSlot(slot);
-        var plan=PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
+        // "Always stand above the layer": below it, do not place from where the player is; walk or climb up first.
+        boolean belowLayer=settings.alwaysAbove && !relaxAbove && !current.support && layerY!=Integer.MIN_VALUE
+                && client.player.getY()<layerY+1-.05;
+        var plan=belowLayer ? null : PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
         if (plan != null) {
             navigator.hold(client,shouldSneak(client,current,plan));
             aim(client,plan);
@@ -479,15 +495,20 @@ public final class AutoBuilderController {
             reason=(current.support ? "Placing a temporary support" : plan.configure() ? "Setting block state" : "Placing block") + " at " + coordinates(current.pos);
             noProgress=0; return;
         }
-        Target lateral=lateralSupport(client,current);
-        if (lateral!=null) { current=lateral; return; }
-        Target access=accessSupport(client,current);
-        if (access!=null) { current=access; return; }
+        if (!belowLayer) {
+            Target lateral=lateralSupport(client,current);
+            if (lateral!=null) { current=lateral; return; }
+            Target access=accessSupport(client,current);
+            if (access!=null) { current=access; return; }
+        }
         BuilderNavigator.Result movement=navigator.moveTo(client,current.pos);
         if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; }
         else if (movement==BuilderNavigator.Result.NO_PATH) {
             if (startPillar(client)) return;
-            if (strandedHome(client,"Fell down with nowhere to walk")) return;
+            if (settings.alwaysAbove && !relaxAbove && client.player.getY()<layerY+1-.05) {
+                relaxAbove=true; navigator.minStandY=Integer.MIN_VALUE; navigator.replan(); return; // cannot climb: place from below
+            }
+            if (strandedHome(client,"No route to walk")) return;
             defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
         }
         else if (movement==BuilderNavigator.Result.STUCK) { noProgress+=30; }
@@ -506,23 +527,119 @@ public final class AutoBuilderController {
         layerY=minimumY;
         LavaGuard.setPlannedLayer(minimumY);
         if (minimumY>homeLayer) {
+            int finished=homeLayer;
             homeLayer=minimumY;
-            if (settings.autoSetHome) { pendingSetHome=true; setHomeUntil=tick+20*60; }
-            reason="Layer finished, moving up to Y=" + minimumY;
+            reason="Layer Y=" + finished + " finished";
+            if (settings.autoSetHome && wrap==Wrap.NONE) {
+                // The home was normally set the moment the player stood one block above this layer; if so, go straight
+                // to breaking the supports. Otherwise walk to a spot above the layer and set it then.
+                wrapLayer=finished; wrapCell=null; wrapHomeSet=homeSetLayer==finished; wrapSent=false; wrapStuck=0;
+                wrapStart=tick; wrapHadSupports=!supportBlocks.isEmpty();
+                wrap=wrapHomeSet ? Wrap.CLEAN : Wrap.WALK;
+            }
         }
     }
 
-    /** /sethome once the player stands one block above the new layer. Returns true while it is waiting to do so. */
-    private boolean trySetHome(Minecraft client) {
+    /**
+     * End of a layer: stand one block above it and /sethome, break the temporary supports, then /home back to that
+     * spot (the supports may have been what the player stood on). Returns true while it is busy.
+     */
+    private boolean wrapTick(Minecraft client) {
         var player=client.player;
-        if (tick>setHomeUntil) { pendingSetHome=false; return false; }
-        // The home goes one block above the layer being built (where the climb ends), never inside the layer itself.
-        int homeY=layerY+1;
-        if (!player.onGround() || player.getY()<homeY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
+        switch (wrap) {
+            case WALK -> {
+                if (wrapCell==null) {
+                    wrapCell=homeCell(client);
+                    wrapStart=tick;
+                    if (wrapCell==null) { reason="No safe spot above layer Y=" + wrapLayer + " for /sethome"; wrap=Wrap.CLEAN; return true; }
+                }
+                BuilderNavigator.Result result=navigator.walkTo(client,wrapCell);
+                reason="Layer Y=" + wrapLayer + " done: going to a spot above it for /sethome";
+                if (result==BuilderNavigator.Result.ARRIVED) { navigator.release(); wrap=Wrap.SETHOME; wrapSent=false; return true; }
+                if (result==BuilderNavigator.Result.STUCK) wrapStuck++;
+                if (result==BuilderNavigator.Result.NO_PATH || wrapStuck>=3 || tick-wrapStart>20*30) {
+                    navigator.reset(); reason="Could not reach a spot above layer Y=" + wrapLayer + "; keeping the old home"; wrap=Wrap.CLEAN;
+                }
+                return true;
+            }
+            case SETHOME -> {
+                navigator.release();
+                if (!wrapSent) {
+                    if (!player.onGround()) return true;
+                    player.connection.sendCommand("sethome " + settings.homeSlot);
+                    wrapSent=true; wrapUntil=tick+20; homeSetLayer=wrapLayer;
+                    reason="/sethome " + settings.homeSlot + " one block above layer Y=" + wrapLayer;
+                } else if (tick>=wrapUntil) { wrapHomeSet=true; wrap=Wrap.CLEAN; }
+                return true;
+            }
+            case CLEAN -> {
+                if (supportBlocks.isEmpty()) { wrap=Wrap.HOME; wrapSent=false; return true; }
+                wrapHadSupports=true;
+                SupportCleanup.Result result=cleanup.tick(client,navigator,supportBlocks,indices.keySet());
+                reason="Layer Y=" + wrapLayer + " done: " + cleanup.reason();
+                if (result==SupportCleanup.Result.DONE) { wrap=Wrap.HOME; wrapSent=false; }
+                else if (result==SupportCleanup.Result.BLOCKED) { cleanup.reset(client); wrap=Wrap.HOME; wrapSent=false; }
+                return true;
+            }
+            case HOME -> {
+                navigator.release();
+                // Only come back to the new home when it was set this layer and something was actually broken.
+                if (!wrapSent) {
+                    if (!wrapHomeSet || !wrapHadSupports) return endWrap(client,"Layer Y=" + wrapLayer + " finished");
+                    player.connection.sendCommand("home " + settings.homeSlot);
+                    wrapFrom=player.position(); wrapSent=true; wrapUntil=tick+60;
+                    reason="Supports removed, /home " + settings.homeSlot;
+                } else if (player.position().distanceToSqr(wrapFrom)>2.25 || tick>=wrapUntil) {
+                    return endWrap(client,"Back above layer Y=" + wrapLayer + ", continuing");
+                }
+                return true;
+            }
+            default -> { return false; }
+        }
+    }
+
+    /**
+     * The moment the player stands one block above the layer being built, /sethome right away (once per layer).
+     * Not on a temporary support (it is broken at the end of the layer) and not next to lava.
+     */
+    private boolean setHomeAbove(Minecraft client) {
+        var player=client.player;
+        double above=player.getY()-(layerY+1);
+        if (!player.onGround() || above<-.05 || above>.5) return false;
+        BlockPos below=player.blockPosition().below();
+        if (supportBlocks.contains(below) || !client.level.getBlockState(below).isCollisionShapeFullBlock(client.level,below)) return false;
+        if (LavaGuard.near(client.level,player.blockPosition()) || LavaGuard.plannedOnLayer(below.above())) return false;
         player.connection.sendCommand("sethome " + settings.homeSlot);
-        pendingSetHome=false; cooldown=10;
-        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + homeY + " (layer Y=" + layerY + " + 1)";
+        homeSetLayer=layerY; cooldown=10;
+        navigator.release();
+        reason="/sethome " + settings.homeSlot + " one block above layer Y=" + layerY;
         return true;
+    }
+
+    private boolean endWrap(Minecraft client, String message) {
+        wrap=Wrap.NONE; wrapCell=null; justFell=false;
+        cleanup.reset(client);
+        resumeAfterTeleport(message);
+        return true;
+    }
+
+    /** A free spot standing one block above a placed block of the finished layer, nearest to the player. */
+    private BlockPos homeCell(Minecraft client) {
+        var level=client.level; var player=client.player;
+        BlockPos best=null; double bestDistance=32*32;
+        for (Target target:targets) {
+            if (target.pos.getY()!=wrapLayer || skipped.get(target.index) || !correct.get(target.index)) continue;
+            double distance=player.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(target.pos.above()));
+            if (distance>=bestDistance) continue;
+            BlockPos feet=target.pos.above();
+            if (supportBlocks.contains(target.pos) || indices.containsKey(feet) || indices.containsKey(feet.above())) continue;
+            if (!MaterialTracker.isLoaded(level,feet.above()) || !level.getFluidState(feet).isEmpty() || !level.getFluidState(feet.above()).isEmpty()) continue;
+            if (!level.getBlockState(feet).getCollisionShape(level,feet).isEmpty() || !level.getBlockState(feet.above()).getCollisionShape(level,feet.above()).isEmpty()) continue;
+            if (!level.getBlockState(target.pos).isCollisionShapeFullBlock(level,target.pos)) continue;
+            if (LavaGuard.near(level,feet) || LavaGuard.plannedOnLayer(feet) || LavaGuard.plannedOnLayer(feet.above())) continue;
+            bestDistance=distance; best=feet.immutable();
+        }
+        return best;
     }
 
     // ---------------------------------------------------------------- lava and getting stuck
@@ -572,7 +689,7 @@ public final class AutoBuilderController {
     private void trackFall(Minecraft client) {
         var player=client.player;
         if (!player.onGround()) return;
-        if (!Double.isNaN(groundY) && groundY-player.getY()>=FALL_BLOCKS) lastFallTick=tick;
+        if (!Double.isNaN(groundY) && groundY-player.getY()>=FALL_BLOCKS) { lastFallTick=tick; justFell=true; }
         groundY=player.getY();
     }
 
@@ -580,13 +697,20 @@ public final class AutoBuilderController {
      * The player fell below the build (or is well under the block it needs) and no route, pillar or
      * placement face is available: go to /home right away instead of waiting 30 s or giving up.
      */
+    /** No route to walk and no way to climb: /home straight away (limited to three tries without progress). */
     private boolean strandedHome(Minecraft client, String why) {
         if (!settings.autoHome || stuckRecoveries>=3 || current==null) return false;
-        boolean fell=tick-lastFallTick<FALL_MEMORY_TICKS;
-        boolean below=current.pos.getY()-client.player.getY()>=FALL_BLOCKS;
-        if (!fell && !below) return false;
         stuckRecoveries++;
         beginHome(client,why);
+        return true;
+    }
+
+    /** The player dropped several blocks and now stands below the layer being built: /home. */
+    private boolean homeAfterFall(Minecraft client) {
+        if (!settings.autoHome || stuckRecoveries>=3 || layerY==Integer.MIN_VALUE) return false;
+        if (client.player.getY()>=layerY) return false;
+        stuckRecoveries++;
+        beginHome(client,"Fell below the layer");
         return true;
     }
 
@@ -613,7 +737,10 @@ public final class AutoBuilderController {
     /** Called when a target is too high to reach and no walking route exists. */
     private boolean startPillar(Minecraft client) {
         if (!settings.pillarUp || current==null || current.support) return false;
-        if (current.pos.getY()-client.player.getY()<1.6 || findSlot(client,SCAFFOLD)<0) return false;
+        boolean high=settings.alwaysAbove && !relaxAbove
+                ? client.player.getY()<current.pos.getY()+1-.05   // always end up one block above the layer
+                : current.pos.getY()-client.player.getY()>=1.6;   // only climb to blocks that are out of reach
+        if (!high || findSlot(client,SCAFFOLD)<0) return false;
         pillar=new Pillar(current,tick); current=null; navigator.reset(); noProgress=0;
         reason="Climbing to " + coordinates(pillar.goal.pos);
         return true;

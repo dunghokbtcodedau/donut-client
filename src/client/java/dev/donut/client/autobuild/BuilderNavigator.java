@@ -21,6 +21,9 @@ public final class BuilderNavigator {
     private int index, stalled;
     private Vec3 lastPosition;
     private BlockPos target;
+    /** Lowest feet Y the player may place from; Integer.MIN_VALUE means no limit ("always stand above the layer"). */
+    public int minStandY = Integer.MIN_VALUE;
+    private boolean exact;
     private final Set<BuilderPathfinder.Cell> rejectedGoals = new HashSet<>();
     /** Cells the player kept failing to enter (usually because lava is in the way); routes go round them. */
     private final Set<BuilderPathfinder.Cell> blocked = new HashSet<>();
@@ -63,6 +66,12 @@ public final class BuilderNavigator {
         replan();
     }
     public int routeLength() { return Math.max(0, route.size() - index); }
+
+    /** Walks to stand exactly in the given feet cell (not to place anything from it). */
+    public Result walkTo(Minecraft client, BlockPos feetCell) {
+        exact = true;
+        try { return moveTo(client, feetCell); } finally { exact = false; }
+    }
 
     public Result moveTo(Minecraft client, BlockPos destination) {
         if (client.level == null || client.player == null) return Result.NO_PATH;
@@ -213,7 +222,9 @@ public final class BuilderNavigator {
     }
 
     private boolean goal(Minecraft client, BuilderPathfinder.Cell at, BlockPos destination) {
+        if (exact) return at.equals(cell(destination)) && client.player.getY() - at.y() < .3;
         if (rejectedGoals.contains(at)) return false;
+        if (at.y() < minStandY) return false;
         // Never stand in a cell the schematic will fill with lava on the layer being built to place from there.
         BlockPos body = pos(at);
         if (LavaGuard.plannedOnLayer(body) || LavaGuard.plannedOnLayer(body.above())) return false;
