@@ -63,6 +63,8 @@ public final class DonutClient implements ClientModInitializer {
         AutoBuilderController autoBuilder = AutoBuilderController.get();
         autoBuilder.configure(config.autoBuilder);
         ClientTickEvents.START_CLIENT_TICK.register(autoBuilder::tick);
+        // The placement follows the movement packet that carried the silent rotation, so it happens at the end of the tick.
+        ClientTickEvents.END_CLIENT_TICK.register(autoBuilder::endTick);
         net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents.GAME.register((message, overlay) -> { if (!overlay) autoBuilder.onServerMessage(message.getString()); });
         HighlightRenderer renderer = new HighlightRenderer(config, scanner, chunkScanner);
         renderer.register();
