@@ -94,6 +94,7 @@ public final class AutoBuilderController {
         progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
         homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
         groundY = Double.NaN; lastFallTick = -100000;
+        LavaGuard.setPlannedLayer(Integer.MIN_VALUE);
     }
     public Schematic schematic() { return schematic; }
     public PlacementTransform transform() { return transform; }
@@ -217,7 +218,7 @@ public final class AutoBuilderController {
     private void rebuildTargets() {
         indices.clear(); correct.clear(); failures.clear(); deferred.clear(); supportBlocks.clear(); scanIndex=0; scanned=false;
         work.clear(); skipped.clear(); revalidateIndex=0; finalCheckIndex=0;
-        if (schematic == null) { targets=List.of(); byIndex=new Target[0]; return; }
+        if (schematic == null) { targets=List.of(); byIndex=new Target[0]; LavaGuard.setPlanned(Set.of()); return; }
         List<Target> values = new ArrayList<>(schematic.blocks().size());
         for (Schematic.Block block : schematic.blocks()) {
             BlockPos pos = transform.apply(block.pos());
@@ -230,6 +231,10 @@ public final class AutoBuilderController {
         for (Target target:values) byIndex[target.index]=target;
         skipped.clear();
         for (Target target:values) if (neverPlaceable(target.state)) skipped.set(target.index);
+        // Where the schematic will have lava: the player may not stand there to place blocks on the layer being built.
+        Set<BlockPos> plannedLava=new HashSet<>();
+        for (Target target:values) if (target.state.is(Blocks.LAVA)) plannedLava.add(target.pos);
+        LavaGuard.setPlanned(plannedLava);
         rebuildWork();
         lastSavedCount=-1;
         loadProgress();
@@ -437,6 +442,7 @@ public final class AutoBuilderController {
     private void noteLayer(int minimumY) {
         if (layerY==Integer.MIN_VALUE) { layerY=minimumY; homeLayer=minimumY; return; }
         layerY=minimumY;
+        LavaGuard.setPlannedLayer(minimumY);
         if (minimumY>homeLayer) {
             homeLayer=minimumY;
             if (settings.autoSetHome) { pendingSetHome=true; setHomeUntil=tick+20*60; }
@@ -575,6 +581,8 @@ public final class AutoBuilderController {
             }
             BlockPos feet=player.blockPosition();
             if (settings.lavaGuard && LavaGuard.near(client.level,feet)) { giveUpClimbing(p,"Lava next to the climbing spot"); return true; }
+            // The column being stacked ends up under the player at the layer being built: not where lava is planned.
+            if (LavaGuard.plannedOnLayer(new BlockPos(feet.getX(),p.goal.pos.getY(),feet.getZ()))) { giveUpClimbing(p,"Lava will be placed at the climbing spot"); return true; }
             if (!client.level.noCollision(player,player.getBoundingBox().expandTowards(0,1.3,0))
                     || !client.level.getBlockState(feet).canBeReplaced()) { giveUpClimbing(p,"No room to climb"); return true; }
             int slot=findSlot(client,SCAFFOLD);

@@ -183,6 +183,9 @@ public final class BuilderNavigator {
 
     private boolean goal(Minecraft client, BuilderPathfinder.Cell at, BlockPos destination) {
         if (rejectedGoals.contains(at)) return false;
+        // Never stand in a cell the schematic will fill with lava on the layer being built to place from there.
+        BlockPos body = pos(at);
+        if (LavaGuard.plannedOnLayer(body) || LavaGuard.plannedOnLayer(body.above())) return false;
         Vec3 eye = new Vec3(at.x()+.5, at.y()+client.player.getEyeHeight(), at.z()+.5);
         // A block cannot be placed into the walking player's body.
         if (at.x()==destination.getX() && at.z()==destination.getZ()
