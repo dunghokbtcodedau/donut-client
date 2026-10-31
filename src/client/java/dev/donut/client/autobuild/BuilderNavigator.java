@@ -22,6 +22,8 @@ public final class BuilderNavigator {
     private Vec3 lastPosition;
     private BlockPos target;
     private final Set<BuilderPathfinder.Cell> rejectedGoals = new HashSet<>();
+    /** Cells the player kept failing to enter (usually because lava is in the way); routes go round them. */
+    private final Set<BuilderPathfinder.Cell> blocked = new HashSet<>();
     /** Routes never use cells with lava in or beside them. */
     public boolean avoidLava = true;
 
@@ -55,7 +57,7 @@ public final class BuilderNavigator {
         route = List.of(); index = 0; stalled = 0; lastPosition = null;
     }
     public void replan() { route = List.of(); index = 0; stalled = 0; lastPosition = null; }
-    public void reset() { release(); target = null; rejectedGoals.clear(); }
+    public void reset() { release(); target = null; rejectedGoals.clear(); blocked.clear(); }
     public void rejectCurrent(Minecraft client) {
         if (client.player != null) rejectedGoals.add(cell(client.player.blockPosition()));
         replan();
@@ -65,15 +67,62 @@ public final class BuilderNavigator {
     public Result moveTo(Minecraft client, BlockPos destination) {
         if (client.level == null || client.player == null) return Result.NO_PATH;
         hold(client, false);
-        if (!destination.equals(target)) { target = destination.immutable(); rejectedGoals.clear(); replan(); }
+        if (!destination.equals(target)) { target = destination.immutable(); rejectedGoals.clear(); blocked.clear(); replan(); }
         BuilderPathfinder.Cell feet = cell(client.player.blockPosition());
         if (goal(client, feet, destination)) return Result.ARRIVED;
         if (route.isEmpty() || index >= route.size()) {
-            BuilderPathfinder.Terrain terrain = new BuilderPathfinder.Terrain() {
+            route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, false), at -> goal(client, at, destination), 6000, 96);
+            // No way round with the full lava margin: accept cells that only stand beside lava (the player sneaks there).
+            if (route.isEmpty() && avoidLava) {
+                route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, true), at -> goal(client, at, destination), 6000, 96);
+            }
+            index = 0;
+            if (route.isEmpty()) return Result.NO_PATH;
+        }
+        BuilderPathfinder.Cell next = route.get(index);
+        Vec3 aim = new Vec3(next.x()+.5, next.y(), next.z()+.5);
+        if (client.player.position().distanceToSqr(aim) < .16) {
+            index++;
+            if (index >= route.size()) { replan(); return Result.MOVING; }
+            next = route.get(index); aim = new Vec3(next.x()+.5, next.y(), next.z()+.5);
+        }
+        Vec3 delta = aim.subtract(client.player.position());
+        client.player.setYRot((float)Math.toDegrees(Math.atan2(-delta.x, delta.z)));
+        client.player.setXRot(10);
+        steering.forward = true;
+        steering.jump = next.y() > client.player.getY()+.25 && client.player.onGround();
+        // Squeezing past a lava corner: hop so the body clears the lava surface instead of brushing it.
+        boolean cornerHop = false;
+        if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) { steering.jump = true; cornerHop = true; }
+        // Within half a block of lava: hold shift so the player cannot slip over an edge. Not while hopping a lava
+        // corner (sneaking would cut the hop short) and not when the next step is a drop (sneaking refuses drops).
+        steering.sneak = !cornerHop && next.y() >= client.player.blockPosition().getY() && lavaWithinHalfBlock(client);
+        if (lastPosition != null && client.player.position().distanceToSqr(lastPosition) < .0004) stalled++;
+        else stalled = 0;
+        lastPosition = client.player.position();
+        if (stalled >= 8) {
+            if (lavaAhead(client, delta)) {
+                // Heading into lava and not getting anywhere: never push on. Rule that cell out and plan a way round.
+                steering.forward = false; steering.jump = false; steering.tick();
+                blocked.add(next); if (blocked.size() > 64) blocked.clear();
+                replan();
+                return Result.MOVING;
+            }
+            // Barely moving with nothing dangerous ahead: hop, which steps onto a block beside the player.
+            if (client.player.onGround()) { steering.jump = true; steering.sneak = false; }
+        }
+        steering.tick();
+        if (stalled > 30) { blocked.add(next); rejectCurrent(client); return Result.STUCK; }
+        return Result.MOVING;
+    }
+
+    private BuilderPathfinder.Terrain makeTerrain(Minecraft client, boolean relaxed) {
+        return new BuilderPathfinder.Terrain() {
                 @Override public boolean standable(BuilderPathfinder.Cell at) {
                     BlockPos pos = pos(at);
                     if (!MaterialTracker.isLoaded(client.level,pos) || !MaterialTracker.isLoaded(client.level,pos.above(2))) return false;
-                    if (avoidLava && LavaGuard.near(client.level, pos)) return false;
+                    if (blocked.contains(at)) return false;
+                    if (avoidLava && (relaxed ? LavaGuard.directly(client.level, pos) : LavaGuard.near(client.level, pos))) return false;
                     var ground = client.level.getBlockState(pos.below());
                     if (ground.is(Blocks.MAGMA_BLOCK) || ground.is(Blocks.CAMPFIRE) || ground.is(Blocks.SOUL_CAMPFIRE)
                             || ground.is(Blocks.CACTUS) || ground.is(Blocks.POWDER_SNOW)
@@ -85,7 +134,7 @@ public final class BuilderNavigator {
                     BlockPos c1 = new BlockPos(b.getX(), a.getY(), a.getZ()), c2 = new BlockPos(a.getX(), a.getY(), b.getZ());
                     int k1 = cornerKind(client, c1), k2 = cornerKind(client, c2);
                     if (!diagonalAllowed(k1, k2)) return false;
-                    if (k1 != CORNER_LAVA && k2 != CORNER_LAVA) return standable(to);
+                    if (relaxed || (k1 != CORNER_LAVA && k2 != CORNER_LAVA)) return standable(to);
                     return standableIgnoringLava(to, c1, c2);
                 }
                 private boolean standableIgnoringLava(BuilderPathfinder.Cell at, BlockPos ignoreA, BlockPos ignoreB) {
@@ -109,34 +158,16 @@ public final class BuilderNavigator {
                             at.x()+.8, at.y()+1.8, at.z()+.8));
                 }
             };
-            route = BuilderPathfinder.find(feet, cell(destination), terrain, at -> goal(client, at, destination), 6000, 96);
-            index = 0;
-            if (route.isEmpty()) return Result.NO_PATH;
-        }
-        BuilderPathfinder.Cell next = route.get(index);
-        Vec3 aim = new Vec3(next.x()+.5, next.y(), next.z()+.5);
-        if (client.player.position().distanceToSqr(aim) < .16) {
-            index++;
-            if (index >= route.size()) { replan(); return Result.MOVING; }
-            next = route.get(index); aim = new Vec3(next.x()+.5, next.y(), next.z()+.5);
-        }
-        Vec3 delta = aim.subtract(client.player.position());
-        client.player.setYRot((float)Math.toDegrees(Math.atan2(-delta.x, delta.z)));
-        client.player.setXRot(10);
-        steering.forward = true;
-        steering.jump = next.y() > client.player.getY()+.25 && client.player.onGround();
-        // Squeezing past a lava corner: hop so the body clears the lava surface instead of brushing it.
-        boolean cornerHop = false;
-        if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) { steering.jump = true; cornerHop = true; }
-        // Within half a block of lava: hold shift so the player cannot slip over an edge. Not while hopping a lava
-        // corner (sneaking would cut the hop short) and not when the next step is a drop (sneaking refuses drops).
-        steering.sneak = !cornerHop && next.y() >= client.player.blockPosition().getY() && lavaWithinHalfBlock(client);
-        steering.tick();
-        if (lastPosition != null && client.player.position().distanceToSqr(lastPosition) < .0004) stalled++;
-        else stalled = 0;
-        lastPosition = client.player.position();
-        if (stalled > 30) { rejectCurrent(client); return Result.STUCK; }
-        return Result.MOVING;
+    }
+
+    /** Lava (real, or planned on the layer being built) in or under the cell 0.8 block ahead along the heading. */
+    private boolean lavaAhead(Minecraft client, Vec3 delta) {
+        double length = Math.hypot(delta.x, delta.z);
+        if (length < 1e-3) return false;
+        Vec3 probe = client.player.position().add(delta.x / length * .8, 0, delta.z / length * .8);
+        BlockPos at = BlockPos.containing(probe);
+        return LavaGuard.lava(client.level, at) || LavaGuard.lava(client.level, at.above()) || LavaGuard.lava(client.level, at.below())
+                || LavaGuard.plannedOnLayer(at);
     }
 
     /** Lava in a cell that touches the player's hitbox grown by 0.5 block, from one level below the feet to head height. */

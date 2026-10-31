@@ -1,5 +1,7 @@
 package dev.donut.client.autobuild;
 
+import dev.donut.client.automine.AutoMineController;
+import dev.donut.client.automine.BaritoneLink;
 import dev.donut.client.config.AutoBuilderSettings;
 import dev.donut.client.freecam.FreecamController;
 import dev.donut.client.mixin.BuilderClientLevelAccessor;
@@ -59,6 +61,8 @@ public final class AutoBuilderController {
     private int layerY = Integer.MIN_VALUE, homeLayer = Integer.MIN_VALUE, setHomeUntil = -1;
     private boolean pendingSetHome;
     private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
+    private final BucketRestock restock = new BucketRestock();
+    private int restockFails;
     private double groundY = Double.NaN;
     private int lastFallTick = -100000;
     private static final int FALL_BLOCKS = 3, FALL_MEMORY_TICKS = 20 * 30;
@@ -255,11 +259,63 @@ public final class AutoBuilderController {
         reason="Checking loaded blocks...";
     }
     public void pause() { pauseWith("Paused by you."); }
+    /** After any teleport: forget the route, re-read the build and carry on. */
+    private void resumeAfterTeleport(String message) {
+        navigator.reset();
+        failures.clear(); deferred.clear(); work.clear();
+        rebuildWork();
+        scanIndex=0; scanned=false; revalidateIndex=0; finalCheckIndex=0; noProgress=0; cooldown=40;
+        current=null; prepared=null; pending=null; pillar=null;
+        progressAnchor=null; progressTick=tick;
+        reason=message;
+    }
+
+    // ---- fetching lava and water when the buckets run out
+
+    /** Lava or water ran out: /sethome, /home to the supply, scoop with Baritone, /home back. False if not possible. */
+    private boolean tryRestock(Minecraft client, Item item) {
+        if (!settings.autoRestock || restockFails>=2) return false;
+        if (item!=Items.LAVA_BUCKET && item!=Items.WATER_BUCKET) return false;
+        if (!AutoMineController.baritoneInstalled()) return false; // Baritone finds and walks to the fluid
+        int lava=bucketsNeeded(client,Items.LAVA_BUCKET), water=bucketsNeeded(client,Items.WATER_BUCKET);
+        if (!restock.start(client,settings,item,lava,water)) return false;
+        current=null; prepared=null; pending=null; pillar=null;
+        navigator.release(); restoreSlot();
+        reason=restock.reason();
+        return true;
+    }
+
+    private void restockTick(Minecraft client) {
+        navigator.release(); // Baritone drives the player during a trip
+        var outcome=restock.tick(client);
+        if (outcome==BucketRestock.Outcome.RUNNING) { reason=restock.reason(); return; }
+        if (outcome==BucketRestock.Outcome.DONE) {
+            if (restock.collected()==0) restockFails++; // went all that way and got nothing: do not loop forever
+            resumeAfterTeleport("Back at the build with " + restock.collected() + " new bucket(s), continuing...");
+        } else {
+            String message=restock.reason();
+            restock.reset(); restockFails++;
+            pauseWith(message);
+        }
+    }
+
+    /** How many buckets of this kind the unfinished part of the build still uses. */
+    private int bucketsNeeded(Minecraft client, Item item) {
+        int needed=0;
+        for (Target target:work) {
+            if (skipped.get(target.index)) continue;
+            BlockState actual=MaterialTracker.isLoaded(client.level,target.pos) ? client.level.getBlockState(target.pos) : Blocks.AIR.defaultBlockState();
+            if (FluidPlacement.requiredItem(target.state,actual)==item) needed++;
+        }
+        return needed;
+    }
+
     private void pauseWith(String message) {
         if (status != Status.RUNNING && status != Status.PAUSED) { reason=message; return; }
         saveProgress();
         status=Status.PAUSED; reason=message; prepared=null; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
+        if (restock.active()) { try { BaritoneLink.cancel(); } catch (RuntimeException | LinkageError ignored) { } }
     }
     public void resume() {
         if (status != Status.PAUSED) { start(); return; }
@@ -281,6 +337,7 @@ public final class AutoBuilderController {
     }
     public void cancel() {
         saveProgress();
+        restock.reset(); restockFails=0;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
         failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
@@ -288,6 +345,7 @@ public final class AutoBuilderController {
     public void disconnect() {
         saveProgress();
         if (isRunning() || status==Status.PAUSED) { pauseWith("Disconnected. Rejoin, check the position, then Resume."); }
+        restock.reset();
         navigator.reset(); restoreSlot(); session=null; pending=null; prepared=null; current=null; correct.clear(); scanIndex=0; scanned=false;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); unconfirmed.clear(); predictionLevel=null;
         previewVisible=false;
@@ -314,6 +372,7 @@ public final class AutoBuilderController {
         if (client.player.isUsingItem()) { pauseWith("Finish using the held item, then Resume."); return; }
         trackFall(client);
         if (lavaEscape(client)) return;
+        if (restock.active()) { restockTick(client); return; }
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
         if (scanned) revalidate(client,256);
@@ -402,7 +461,10 @@ public final class AutoBuilderController {
         }
         boolean configuring=PlacementPlanner.needsConfiguration(current.state,actual);
         int slot=configuring && bucket==null ? client.player.getInventory().getSelectedSlot() : findSlot(client,requiredItem);
-        if (slot<0) { pauseWith("Missing " + requiredItem.getName().getString() + ". Add materials, then Resume."); return; }
+        if (slot<0) {
+            if (tryRestock(client,requiredItem)) return;
+            pauseWith("Missing " + requiredItem.getName().getString() + ". Add materials, then Resume."); return;
+        }
         if (slot>=9) {
             int selected=client.player.getInventory().getSelectedSlot();
             client.gameMode.handleInventoryMouseClick(client.player.inventoryMenu.containerId,slot,selected,ClickType.SWAP,client.player);
@@ -486,7 +548,7 @@ public final class AutoBuilderController {
         int blocks=correct.cardinality(), supports=supportBlocks.size();
         boolean built=blocks!=progressBlocks || supports!=progressSupports;
         if (progressAnchor==null || built || pos.distanceToSqr(progressAnchor)>4.0) {
-            if (built) stuckRecoveries=0;
+            if (built) { stuckRecoveries=0; restockFails=0; }
             progressAnchor=pos; progressBlocks=blocks; progressSupports=supports; progressTick=tick;
             return false;
         }
@@ -533,12 +595,8 @@ public final class AutoBuilderController {
         if (homeWaitUntil<0) return false;
         navigator.hold(client,false);
         if (client.player.position().distanceToSqr(homeFrom)>16) {
-            homeWaitUntil=-1; navigator.reset();
-            failures.clear(); deferred.clear(); work.clear();
-            rebuildWork();
-            scanIndex=0; scanned=false; revalidateIndex=0; finalCheckIndex=0; noProgress=0; cooldown=40;
-            progressAnchor=null; progressTick=tick;
-            reason="Back at home " + settings.homeSlot + ", checking the build and continuing...";
+            homeWaitUntil=-1;
+            resumeAfterTeleport("Back at home " + settings.homeSlot + ", checking the build and continuing...");
             return true;
         }
         if (tick>=homeWaitUntil) {

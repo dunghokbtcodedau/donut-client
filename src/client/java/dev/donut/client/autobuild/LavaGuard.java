@@ -45,6 +45,11 @@ final class LavaGuard {
         return (at.getX() == a.getX() && at.getZ() == a.getZ()) || (at.getX() == b.getX() && at.getZ() == b.getZ());
     }
 
+    /** Lava in the feet cell, the head cell or right under the feet (lava merely beside the player does not count). */
+    static boolean directly(ClientLevel level, BlockPos feet) {
+        return lava(level, feet) || lava(level, feet.above()) || lava(level, feet.below());
+    }
+
     /** Lava in the feet or head cell, in the four cells beside them, or right under the feet. */
     static boolean near(ClientLevel level, BlockPos feet) {
         for (int dy = 0; dy <= 1; dy++) {
