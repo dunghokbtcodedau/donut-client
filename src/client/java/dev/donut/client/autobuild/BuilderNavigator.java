@@ -21,6 +21,8 @@ public final class BuilderNavigator {
     private Vec3 lastPosition;
     private BlockPos target;
     private final Set<BuilderPathfinder.Cell> rejectedGoals = new HashSet<>();
+    /** Routes never use cells with lava in or beside them. */
+    public boolean avoidLava = true;
 
     private static final class SteeringInput extends ClientInput {
         boolean forward, jump, sneak;
@@ -37,6 +39,13 @@ public final class BuilderNavigator {
             release(); owner = client.player; saved = owner.input; owner.input = steering;
         }
         steering.forward = false; steering.jump = false; steering.sneak = sneak; steering.tick();
+    }
+
+    /** Stand still for this tick and press the jump key (used when climbing on temporary blocks). */
+    public void jump(Minecraft client) {
+        hold(client, false);
+        steering.jump = true;
+        steering.tick();
     }
 
     public void release() {
@@ -63,6 +72,7 @@ public final class BuilderNavigator {
                 @Override public boolean standable(BuilderPathfinder.Cell at) {
                     BlockPos pos = pos(at);
                     if (!MaterialTracker.isLoaded(client.level,pos) || !MaterialTracker.isLoaded(client.level,pos.above(2))) return false;
+                    if (avoidLava && LavaGuard.near(client.level, pos)) return false;
                     var ground = client.level.getBlockState(pos.below());
                     if (ground.is(Blocks.MAGMA_BLOCK) || ground.is(Blocks.CAMPFIRE) || ground.is(Blocks.SOUL_CAMPFIRE)
                             || ground.is(Blocks.CACTUS) || ground.is(Blocks.POWDER_SNOW)
