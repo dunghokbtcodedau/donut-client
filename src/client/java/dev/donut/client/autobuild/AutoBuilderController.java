@@ -53,7 +53,7 @@ public final class AutoBuilderController {
     private String restored = "";
 
     // ---- safety, climbing and recovery state
-    private static final int STUCK_TICKS = 20 * 30, HOME_WAIT_TICKS = 20 * 15, HOME_COOLDOWN_TICKS = 20 * 3;
+    private static final int STUCK_TICKS = 20 * 60, HOME_WAIT_TICKS = 20 * 15, HOME_COOLDOWN_TICKS = 20 * 3;
     private static final int MAX_FAILED_JUMPS = 6, PILLAR_TIMEOUT = 20 * 90;
     private static final Item SCAFFOLD = Items.COBBLED_DEEPSLATE;
     private AutoBuilderSettings settings = new AutoBuilderSettings();
@@ -71,6 +71,10 @@ public final class AutoBuilderController {
     private boolean wrapHomeSet, wrapSent, wrapHadSupports, justFell, relaxAbove;
     private net.minecraft.world.phys.Vec3 wrapFrom;
     private int restockFails;
+    // /sethome bookkeeping: the server may answer "Unknown or incomplete command"
+    private int lastSetHomeTick = -100000, setHomeRetries, nextSetHomeTick = -100000, setHomeRetryLayer = Integer.MIN_VALUE;
+    private boolean setHomeRejected;
+    private static final int SETHOME_REPLY_TICKS = 20 * 5, SETHOME_RETRY_TICKS = 20 * 3, SETHOME_MAX_RETRIES = 2;
     private double groundY = Double.NaN;
     private int lastFallTick = -100000;
     private static final int STUCK_HOME_TICKS = 20;
@@ -384,6 +388,7 @@ public final class AutoBuilderController {
         if (lavaEscape(client)) return;
         if (restock.active()) { justFell=false; restockTick(client); return; }
         if (justFell && wrap==Wrap.NONE) { justFell=false; if (homeAfterFall(client)) return; }
+        if (wrap==Wrap.NONE) handleSetHomeRejected();
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
         if (scanned) revalidate(client,256);
@@ -574,9 +579,13 @@ public final class AutoBuilderController {
                 navigator.release();
                 if (!wrapSent) {
                     if (!player.onGround()) return true;
-                    player.connection.sendCommand("sethome " + settings.homeSlot);
+                    if (tick<nextSetHomeTick) return true;
+                    sendSetHome(client);
                     wrapSent=true; wrapUntil=tick+20; homeSetLayer=wrapLayer;
                     reason="/sethome " + settings.homeSlot + " one block above layer Y=" + wrapLayer;
+                } else if (setHomeRejected) {
+                    int layer=layerY; layerY=wrapLayer; boolean retry=handleSetHomeRejected(); layerY=layer;
+                    if (retry) wrapSent=false; else { wrapHomeSet=true; wrap=Wrap.CLEAN; }
                 } else if (tick>=wrapUntil) { wrapHomeSet=true; wrap=Wrap.CLEAN; }
                 return true;
             }
@@ -605,10 +614,48 @@ public final class AutoBuilderController {
         BlockPos below=player.blockPosition().below();
         if (supportBlocks.contains(below) || !client.level.getBlockState(below).isCollisionShapeFullBlock(client.level,below)) return false;
         if (LavaGuard.near(client.level,player.blockPosition()) || LavaGuard.plannedOnLayer(below.above())) return false;
-        player.connection.sendCommand("sethome " + settings.homeSlot);
+        if (tick<nextSetHomeTick) return false; // waiting before a retry, keep building meanwhile
+        sendSetHome(client);
         homeSetLayer=layerY; cooldown=10;
         navigator.release();
         reason="/sethome " + settings.homeSlot + " one block above layer Y=" + layerY;
+        return true;
+    }
+
+    /** Sends /sethome and remembers when, so a server error reply can be matched to it. */
+    private void sendSetHome(Minecraft client) {
+        client.player.connection.sendCommand("sethome " + settings.homeSlot);
+        lastSetHomeTick=tick; setHomeRejected=false;
+    }
+
+    /** Called for every chat/system message the client receives (client thread). */
+    public void onServerMessage(String text) {
+        if (text == null || status != Status.RUNNING) return;
+        if (tick-lastSetHomeTick > SETHOME_REPLY_TICKS) return;
+        String lower=text.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("unknown or incomplete command") || lower.contains("unknown command") || lower.contains("incorrect argument for command")) {
+            setHomeRejected=true;
+            lastSetHomeTick=-100000; // one error answers one command
+        }
+    }
+
+    /**
+     * The server refused /sethome. Never block the build because of it: try again a couple of times
+     * (3 s apart) and then carry on without a new home for this layer.
+     * Returns true when a retry was scheduled.
+     */
+    private boolean handleSetHomeRejected() {
+        if (!setHomeRejected) return false;
+        setHomeRejected=false;
+        if (setHomeRetryLayer!=layerY) { setHomeRetryLayer=layerY; setHomeRetries=0; }
+        if (setHomeRetries>=SETHOME_MAX_RETRIES) {
+            reason="/sethome " + settings.homeSlot + " was rejected by the server; building on without a new home";
+            return false;
+        }
+        setHomeRetries++;
+        nextSetHomeTick=tick+SETHOME_RETRY_TICKS;
+        homeSetLayer=Integer.MIN_VALUE; // allow the retry
+        reason="/sethome " + settings.homeSlot + " rejected, retrying (" + setHomeRetries + "/" + SETHOME_MAX_RETRIES + ")";
         return true;
     }
 
@@ -655,7 +702,7 @@ public final class AutoBuilderController {
         return true;
     }
 
-    /** No new block and no real movement for 30 s means the builder is stuck. */
+    /** No new block and no real movement for 60 s means the builder is stuck (the only time /home is used to recover). */
     private boolean watchProgress(Minecraft client) {
         var pos=client.player.position();
         int blocks=correct.cardinality(), supports=supportBlocks.size();
@@ -667,7 +714,7 @@ public final class AutoBuilderController {
         }
         if (tick-progressTick<STUCK_TICKS) return false;
         progressTick=tick;
-        if (!settings.autoHome) { pauseWith("No progress for 30 seconds. Move the player, then Resume."); return true; }
+        if (!settings.autoHome) { pauseWith("No progress for 60 seconds. Move the player, then Resume."); return true; }
         if (stuckRecoveries>=3) { pauseWith("Still stuck after /home " + settings.homeSlot + " three times. Check the build, then Resume."); return true; }
         stuckRecoveries++;
         beginHome(client,"Stuck");
@@ -676,6 +723,7 @@ public final class AutoBuilderController {
 
     private void beginHome(Minecraft client, String why) {
         sendHome(client);
+        progressTick=tick;
         homeFrom=client.player.position(); homeWaitUntil=tick+HOME_WAIT_TICKS;
         pillar=null; current=null; prepared=null; pending=null; unconfirmed.clear();
         reason=why + ", using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
@@ -696,6 +744,7 @@ public final class AutoBuilderController {
     /** No route to walk and no way to climb: /home straight away (limited to three tries without progress). */
     private boolean strandedHome(Minecraft client, String why) {
         if (!settings.autoHome || stuckRecoveries>=3 || current==null) return false;
+        if (tick-progressTick<STUCK_TICKS) return false; // /home only after 1 minute without progress
         stuckRecoveries++;
         beginHome(client,why);
         return true;
@@ -705,6 +754,7 @@ public final class AutoBuilderController {
     private boolean homeAfterFall(Minecraft client) {
         if (!settings.autoHome || stuckRecoveries>=3 || layerY==Integer.MIN_VALUE) return false;
         if (client.player.getY()>=layerY) return false;
+        if (tick-progressTick<STUCK_TICKS) return false; // /home only after 1 minute without progress
         stuckRecoveries++;
         beginHome(client,"Fell below the layer");
         return true;
