@@ -61,46 +61,12 @@ jobs:
           done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Keep the freshly built jar(s) aside. A jar is binary, so rebasing it always conflicts
-          # when someone else pushed meanwhile. Instead, jump to the newest branch tip and put the
-          # new jar on top of it: the new jar always wins and no source commit is ever lost.
-          rm -rf /tmp/newjars && mkdir -p /tmp/newjars
-          cp releases/*.jar /tmp/newjars/
-
-          for attempt in 1 2 3; do
-            git fetch origin "${GITHUB_REF_NAME}"
-
-            # Never let an older run overwrite a newer one. If the branch now contains a change
-            # outside releases/ that this run did not build, this jar is stale: skip it, because
-            # the run for that newer commit builds and commits the correct jar.
-            if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${GITHUB_REF_NAME}"; then
-              echo "Branch was rewritten since this run started; skipping jar commit."
-              exit 0
-            fi
-            newer=$(git diff --name-only "${GITHUB_SHA}" "origin/${GITHUB_REF_NAME}" -- . ':(exclude)releases')
-            if [ -n "$newer" ]; then
-              echo "Newer source commits exist, this jar is stale; skipping jar commit:"
-              echo "$newer"
-              exit 0
-            fi
-
-            git reset --hard "origin/${GITHUB_REF_NAME}"
-            mkdir -p releases
-            rm -f releases/*.jar
-            cp /tmp/newjars/*.jar releases/
-            git add -A releases
-            if git diff --cached --quiet; then
-              echo "Jar is unchanged, nothing to commit."
-              exit 0
-            fi
-            # [skip ci] stops this commit from starting another run.
-            git commit -m "Update built jar [skip ci]"
-            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
-              exit 0
-            fi
-            echo "Push rejected (attempt $attempt), retrying..."
-            sleep 3
-          done
-          echo "Could not push the jar after 3 attempts." >&2
-          exit 1
+          git add -A releases
+          if git diff --cached --quiet; then
+            echo "Jar is unchanged, nothing to commit."
+            exit 0
+          fi
+          # [skip ci] stops this commit from starting another run.
+          git commit -m "Update built jar [skip ci]"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
