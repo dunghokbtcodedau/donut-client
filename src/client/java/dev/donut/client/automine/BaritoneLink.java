@@ -11,7 +11,7 @@ import net.minecraft.core.BlockPos;
  * public API methods that take plain Java types are used (getPrimaryBaritone, getMineProcess, mineByName,
  * isActive, cancel, cancelEverything), so Minecraft's runtime class names never matter.
  */
-final class BaritoneLink {
+public final class BaritoneLink {
     private static Method getProvider, getPrimary, getMineProcess, mineByName, isActive, cancelMine;
     private static Method getPathing, cancelEverything;
     private static Method getBuilderProcess, clearArea, getCustomGoalProcess, setGoalAndPath, processActive;
@@ -79,7 +79,7 @@ final class BaritoneLink {
         }
     }
 
-    static void cancel() {
+    public static void cancel() {
         try {
             Object baritone = baritone();
             call(cancelMine, call(getMineProcess, baritone));
@@ -100,7 +100,7 @@ final class BaritoneLink {
     }
 
     /** Walks to within {@code range} blocks of the position. */
-    static void goTo(BlockPos pos, int range) {
+    public static void goTo(BlockPos pos, int range) {
         try {
             bind();
             Object goal = goalNear.newInstance(pos, range);
@@ -119,7 +119,7 @@ final class BaritoneLink {
         }
     }
 
-    static boolean goToActive() {
+    public static boolean goToActive() {
         try {
             bind();
             return (Boolean) call(processActive, call(getCustomGoalProcess, baritone()));
