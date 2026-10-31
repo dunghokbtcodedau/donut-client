@@ -23,7 +23,7 @@ class AutoBuilderSettingsTest {
         assertTrue(loaded.autoBuilder.favorite);
         assertEquals(.53, loaded.autoBuilder.previewOpacity);
         var saved = JsonParser.parseString(Files.readString(path)).getAsJsonObject().getAsJsonObject("autoBuilder");
-        assertEquals(7, saved.size(), "Only preferences may persist, never activation or position");
+        assertEquals(10, saved.size(), "Only preferences may persist, never activation or position");
         assertFalse(saved.has("enabled"));
         assertFalse(saved.has("origin"));
     }
@@ -32,11 +32,18 @@ class AutoBuilderSettingsTest {
         AutoBuilderSettings settings = new AutoBuilderSettings();
         assertTrue(settings.pillarUp && settings.lavaGuard && settings.autoHome && settings.autoSetHome);
         assertEquals(3, settings.homeSlot);
+        assertTrue(settings.autoRestock);
+        assertEquals(2, settings.lavaHomeSlot);
+        assertEquals(1, settings.waterHomeSlot);
         Path path = directory.resolve("donut.json");
         Files.writeString(path, "{\"autoBuilder\":{\"homeSlot\":0}}");
         assertEquals(1, new ConfigStore(path).load().autoBuilder.homeSlot);
         Files.writeString(path, "{\"autoBuilder\":{\"homeSlot\":999}}");
         assertEquals(100, new ConfigStore(path).load().autoBuilder.homeSlot);
+        Files.writeString(path, "{\"autoBuilder\":{\"lavaHomeSlot\":0,\"waterHomeSlot\":999}}");
+        var restock = new ConfigStore(path).load().autoBuilder;
+        assertEquals(1, restock.lavaHomeSlot);
+        assertEquals(100, restock.waterHomeSlot);
     }
 
     @Test void existingAndNullConfigurationsRestoreUsablePreferences() throws IOException {
