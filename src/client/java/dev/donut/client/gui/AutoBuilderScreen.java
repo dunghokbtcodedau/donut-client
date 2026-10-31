@@ -35,6 +35,7 @@ import static dev.donut.client.gui.UiPaint.*;
 /** Animated schematic library, positioning controls and live materials modal. */
 public final class AutoBuilderScreen extends Screen {
     private static final int W = 840, H = 510;
+    private long clearConfirmUntil;
     private static final int TEXT = 0xFFECECF3, MUTED = 0xFFA3A3B2, DIM = 0xFF6C6C80;
     private static final int PANEL = 0xFF101117, CARD = 0xFF11151C, BORDER = 0xFF292A36;
     private final Screen parent;
@@ -246,9 +247,17 @@ public final class AutoBuilderScreen extends Screen {
             }
         });
         button(g, "cancel", "Cancel", 473, 459, 89, available, false, builder::cancel);
+        // Two clicks, so saved progress is never deleted by accident.
+        boolean confirming = System.currentTimeMillis() < clearConfirmUntil;
+        button(g, "clearProgress", confirming ? "Click to confirm" : "Clear progress", 572, 459, 108, available, false, () -> {
+            if (!confirming) { clearConfirmUntil = System.currentTimeMillis() + 3000; return; }
+            clearConfirmUntil = 0;
+            message = "";
+            builder.clearProgress();
+        });
         String reason = message.isEmpty() ? builder.reason() : message;
-        text(g, font, ellipsize(reason, 238), 579, 469, message.isEmpty() ? MUTED : 0xFFFFC66B);
-        if (!reason.isEmpty()) hit("reason", 575, 459, 242, 26, () -> openDetails(reason));
+        text(g, font, ellipsize(reason, 125), 692, 469, message.isEmpty() ? MUTED : 0xFFFFC66B);
+        if (!reason.isEmpty()) hit("reason", 688, 459, 129, 26, () -> openDetails(reason));
         text(g, font, "Server-confirmed placement / Walk + jump navigation", 251, 493, DIM);
     }
 
