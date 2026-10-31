@@ -491,7 +491,7 @@ public final class AutoBuilderController {
         var plan=belowLayer ? null : PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
         if (plan != null) {
             navigator.hold(client,shouldSneak(client,current,plan));
-            aim(client,plan);
+            if (settings.autoRotate) aim(client,plan);
             prepared=new Prepared(current,plan,tick+2);
             reason=(current.support ? "Placing a temporary support" : plan.configure() ? "Setting block state" : "Placing block") + " at " + coordinates(current.pos);
             noProgress=0; return;
@@ -753,7 +753,7 @@ public final class AutoBuilderController {
         if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()+1-.05)) { pillar=null; navigator.reset(); return false; }
         if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
-        player.setXRot(90f);
+        if (settings.autoRotate) player.setXRot(90f);
         if (player.onGround()) {
             if (p.airborne) { // just landed
                 p.airborne=false;
@@ -775,7 +775,7 @@ public final class AutoBuilderController {
             }
             player.getInventory().setSelectedSlot(slot);
             // The look-down has to be sent before the jump so the click can follow without another rotation.
-            if (Math.abs(((BuilderLocalPlayerAccessor)player).donut$lastSentPitch()-90f)<.5f) {
+            if (!settings.autoRotate || Math.abs(((BuilderLocalPlayerAccessor)player).donut$lastSentPitch()-90f)<.5f) {
                 p.base=feet.immutable(); p.airborne=true;
                 navigator.jump(client);
             }
@@ -876,12 +876,13 @@ public final class AutoBuilderController {
         plan=pillarAim(client,plan);
         boolean sneak=shouldSneak(client,current,plan);
         navigator.hold(client,sneak);
-        aim(client,plan);
+        if (settings.autoRotate) aim(client,plan);
         var sent=(BuilderLocalPlayerAccessor)client.player;
         // Let vanilla send rotation/input once per client tick before the interaction. An extra
         // movement packet here duplicates LocalPlayer.sendPosition and violates strict packet ordering.
-        if (Math.abs(net.minecraft.util.Mth.wrapDegrees(sent.donut$lastSentYaw()-plan.yaw()))>.001f
-                || Math.abs(sent.donut$lastSentPitch()-plan.pitch())>.001f
+        boolean rotationOff=settings.autoRotate && (Math.abs(net.minecraft.util.Mth.wrapDegrees(sent.donut$lastSentYaw()-plan.yaw()))>.001f
+                || Math.abs(sent.donut$lastSentPitch()-plan.pitch())>.001f);
+        if (rotationOff
                 || sent.donut$lastSentInput()==null || sent.donut$lastSentInput().shift()!=sneak) {
             prepared=new Prepared(current,plan,tick+1);
             reason="Aligning for placement at " + coordinates(current.pos);
