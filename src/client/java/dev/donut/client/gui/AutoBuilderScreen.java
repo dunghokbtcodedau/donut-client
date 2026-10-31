@@ -228,7 +228,7 @@ public final class AutoBuilderScreen extends Screen {
         boolean available = builder.schematic() != null && !loading;
         String status = builder.status().name().toLowerCase(Locale.ROOT);
         status = Character.toUpperCase(status.charAt(0)) + status.substring(1);
-        text(g, font, status + "  " + Math.round(builder.progress() * 100) + "%", 24, 464, TEXT);
+        text(g, font, status + "  " + Math.round(builder.progress() * 100) + "%  " + number(builder.confirmedBlocks()) + "/" + number(builder.totalBlocks()), 24, 464, TEXT);
         round(g, 24, 482, 203, 4, 2, BORDER);
         round(g, 24, 482, (int) (203 * builder.progress()), 4, 2, alpha(config.accentColor, 1));
         button(g, "materials", "Materials", 251, 459, 103, available, false, () -> {
@@ -346,7 +346,10 @@ public final class AutoBuilderScreen extends Screen {
             loading = false;
             if (error != null) { message = "Invalid schematic: " + errorMessage(error); return; }
             builder.setSchematic(value);
-            if (minecraft.player != null) builder.setTransform(new PlacementTransform(minecraft.player.blockPosition(), 0, false));
+            // A schematic with saved progress returns to the position it was being built at.
+            PlacementTransform saved = builder.savedTransform();
+            if (saved != null) builder.setTransform(saved);
+            else if (minecraft.player != null) builder.setTransform(new PlacementTransform(minecraft.player.blockPosition(), 0, false));
             syncCoordinates();
             invalidateMaterials();
             model.setSchematic(value);
