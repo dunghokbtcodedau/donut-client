@@ -514,26 +514,31 @@ public final class AutoBuilderController {
         BuilderNavigator.Result movement=navigator.moveTo(client,current.pos);
         if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; noRouteTicks=0; }
         else if (movement==BuilderNavigator.Result.NO_PATH) {
+            // Only a route that stays missing for over a second counts as stuck; until then just keep looking.
+            if (++noRouteTicks<STUCK_HOME_TICKS) { reason="Looking for a route to " + coordinates(current.pos); return; }
+            noRouteTicks=0;
+            // Stuck. Jumping (pillar) is the last resort, and /home follows when jumping is not possible.
+            reason="Stuck: no route to " + coordinates(current.pos);
             if (startPillar(client)) return;
             if (settings.alwaysAbove && !relaxAbove && client.player.getY()<layerY+1-.05) {
                 relaxAbove=true; navigator.minStandY=Integer.MIN_VALUE; navigator.replan(); return; // cannot climb: place from below
             }
-            // Only a route that stays missing for over a second counts as stuck.
-            if (++noRouteTicks<STUCK_HOME_TICKS) { reason="Looking for a route to " + coordinates(current.pos); return; }
-            noRouteTicks=0;
-            if (strandedHome(client,"No route for over a second")) return;
+            if (strandedHome(client,"Stuck, cannot jump")) return;
             defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
         }
         else if (movement==BuilderNavigator.Result.STUCK) {
             // The navigator reports STUCK only after the player has not moved for over a second.
+            // Stuck for over a second: say so, keep trying to walk; jumping and /home only after the retries below.
             noProgress+=30; noRouteTicks=0;
-            if (strandedHome(client,"Stuck for over a second")) return;
+            reason="Stuck near " + coordinates(current.pos);
+            return;
         }
         else { noProgress++; noRouteTicks=0; }
         reason="Walking to " + coordinates(current.pos) + " / " + navigator.routeLength() + " steps";
         if (noProgress>300) {
+            reason="Stuck: cannot reach " + coordinates(current.pos);
             if (startPillar(client)) return;
-            if (strandedHome(client,"Cannot get back to the build")) return;
+            if (strandedHome(client,"Stuck, cannot jump")) return;
             defer("Cannot reach a valid placement face or orientation at " + coordinates(current.pos) + ". Provide access, then Resume.");
         }
     }
@@ -745,10 +750,9 @@ public final class AutoBuilderController {
      * The player fell below the build (or is well under the block it needs) and no route, pillar or
      * placement face is available: go to /home right away instead of waiting 30 s or giving up.
      */
-    /** No route to walk and no way to climb: /home straight away (limited to three tries without progress). */
+    /** Stuck and no way to jump any more: /home straight away (limited to three tries without progress). */
     private boolean strandedHome(Minecraft client, String why) {
         if (!settings.autoHome || stuckRecoveries>=3 || current==null) return false;
-        if (tick-progressTick<STUCK_TICKS) return false; // /home only after 1 minute without progress
         stuckRecoveries++;
         beginHome(client,why);
         return true;
@@ -792,7 +796,7 @@ public final class AutoBuilderController {
                 : current.pos.getY()-client.player.getY()>=1.6;   // only climb to blocks that are out of reach
         if (!high || findSlot(client,SCAFFOLD)<0) return false;
         pillar=new Pillar(current,tick); current=null; navigator.reset(); noProgress=0;
-        reason="Climbing to " + coordinates(pillar.goal.pos);
+        reason="Stuck, jumping up to " + coordinates(pillar.goal.pos);
         return true;
     }
 
@@ -805,20 +809,20 @@ public final class AutoBuilderController {
         // Keep stacking until the player stands one block ABOVE the layer being built (feet at layer Y+1, resting on a
         // block at layer Y). Only then does construction resume; a jump in mid-air never counts as having arrived.
         if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()+1-.05)) { pillar=null; navigator.reset(); return false; }
-        if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
+        if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(client,p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
         if (player.onGround()) {
             if (p.airborne) { // just landed
                 p.airborne=false;
-                if (!p.placedThisJump && ++p.failed>=MAX_FAILED_JUMPS) { giveUpClimbing(p,"Could not place a block while climbing"); return true; }
+                if (!p.placedThisJump && ++p.failed>=MAX_FAILED_JUMPS) { giveUpClimbing(client,p,"Could not place a block while climbing"); return true; }
                 p.placedThisJump=false;
             }
             BlockPos feet=player.blockPosition();
-            if (settings.lavaGuard && LavaGuard.near(client.level,feet)) { giveUpClimbing(p,"Lava next to the climbing spot"); return true; }
+            if (settings.lavaGuard && LavaGuard.near(client.level,feet)) { giveUpClimbing(client,p,"Lava next to the climbing spot"); return true; }
             // The column being stacked ends up under the player at the layer being built: not where lava is planned.
-            if (LavaGuard.plannedOnLayer(new BlockPos(feet.getX(),p.goal.pos.getY(),feet.getZ()))) { giveUpClimbing(p,"Lava will be placed at the climbing spot"); return true; }
+            if (LavaGuard.plannedOnLayer(new BlockPos(feet.getX(),p.goal.pos.getY(),feet.getZ()))) { giveUpClimbing(client,p,"Lava will be placed at the climbing spot"); return true; }
             if (!client.level.noCollision(player,player.getBoundingBox().expandTowards(0,1.3,0))
-                    || !client.level.getBlockState(feet).canBeReplaced()) { giveUpClimbing(p,"No room to climb"); return true; }
+                    || !client.level.getBlockState(feet).canBeReplaced()) { giveUpClimbing(client,p,"No room to climb"); return true; }
             // The block under the feet is the schematic's own block when the schematic has a simple full block in
             // that cell; the temporary support is only used where the schematic has nothing (or nothing placeable).
             p.main=mainBlockFor(client,feet);
@@ -835,7 +839,7 @@ public final class AutoBuilderController {
             // No look-down: the block under the feet is placed with a silent pitch of 90 on that tick's movement packet.
             p.base=feet.immutable(); p.airborne=true;
             navigator.jump(client);
-            reason="Climbing to " + coordinates(p.goal.pos);
+            reason="Stuck, jumping up to " + coordinates(p.goal.pos);
             return true;
         }
         p.airborne=true;
@@ -865,8 +869,14 @@ public final class AutoBuilderController {
         return MaterialTracker.requirement(state).item() instanceof BlockItem ? target : null;
     }
 
-    private void giveUpClimbing(Pillar p,String message) {
+    private void giveUpClimbing(Minecraft client,Pillar p,String message) {
         pillar=null; current=p.goal; navigator.reset();
+        // Cannot jump any more: go home instead of giving up on the block.
+        if (settings.autoHome && stuckRecoveries<3) {
+            stuckRecoveries++;
+            beginHome(client,"Stuck, cannot jump (" + message + ")");
+            return;
+        }
         defer(message + " at " + coordinates(p.goal.pos) + ". Provide a path, then Resume.");
     }
 
@@ -953,8 +963,8 @@ public final class AutoBuilderController {
             reason="Aligning for placement at " + coordinates(current.pos);
             return;
         }
-        if (settings.autoRotate) {
-            // Silent rotation: this tick's regular movement packet carries the placement's yaw/pitch (the camera
+        if (settings.autoRotate && needsRotation(client,current)) {
+            // Silent rotation (only for blocks whose state depends on facing, and buckets): this tick's regular movement packet carries the placement's yaw/pitch (the camera
             // does not turn) and the placement itself follows at the end of the tick, see endTick.
             SilentRotation.queue(plan.yaw(),plan.pitch());
             committed=new Committed(current,plan);
@@ -962,6 +972,11 @@ public final class AutoBuilderController {
             return;
         }
         place(client,plan,false);
+    }
+
+    /** Silent rotation is only worth sending for directional blocks (and buckets, which read the look vector). */
+    private static boolean needsRotation(Minecraft client,Target target) {
+        return FluidPlacement.isBucket(client.player.getMainHandItem()) || PlacementPlanner.isDirectional(target.state());
     }
 
     /** End of the client tick: the movement packet with the silent rotation has been sent, now place. */

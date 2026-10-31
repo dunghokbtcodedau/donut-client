@@ -27,6 +27,17 @@ public final class PlacementPlanner {
     private static final float[][] ORIENTATIONS = {{0, 0}, {90, 0}, {180, 0}, {-90, 0}, {0, 90}, {0, -90}};
     private PlacementPlanner() { }
 
+    /** True when the placed state depends on the player's rotation (facing, axis, rotation, attach face, orientation). */
+    public static boolean isDirectional(BlockState state) {
+        for (Property<?> property : state.getProperties()) {
+            Class<?> type = property.getValueClass();
+            if (type == Direction.class || type == Direction.Axis.class) return true;
+            String name = property.getName();
+            if (name.equals("rotation") || name.equals("face") || name.equals("orientation")) return true;
+        }
+        return false;
+    }
+
     public static boolean compatible(BlockState desired, BlockState predicted) {
         if (predicted == null || desired.getBlock() != predicted.getBlock()) return false;
         for (Property<?> property : desired.getProperties()) {
