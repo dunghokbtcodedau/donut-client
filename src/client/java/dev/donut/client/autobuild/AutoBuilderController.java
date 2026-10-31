@@ -444,14 +444,16 @@ public final class AutoBuilderController {
         }
     }
 
-    /** /sethome once the player stands on the new layer. Returns true while it is waiting to do so. */
+    /** /sethome once the player stands one block above the new layer. Returns true while it is waiting to do so. */
     private boolean trySetHome(Minecraft client) {
         var player=client.player;
         if (tick>setHomeUntil) { pendingSetHome=false; return false; }
-        if (!player.onGround() || player.getY()<layerY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
+        // The home goes one block above the layer being built (where the climb ends), never inside the layer itself.
+        int homeY=layerY+1;
+        if (!player.onGround() || player.getY()<homeY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
         player.connection.sendCommand("sethome " + settings.homeSlot);
         pendingSetHome=false; cooldown=10;
-        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + layerY;
+        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + homeY + " (layer Y=" + layerY + " + 1)";
         return true;
     }
 
