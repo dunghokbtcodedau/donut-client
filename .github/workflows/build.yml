@@ -47,6 +47,8 @@ jobs:
       - name: Commit jar to the repository
         if: success() && github.event_name != 'pull_request'
         run: |
+          # chmod +x gradlew above changes a file mode; ignore it so the tree stays clean for the rebase.
+          git config core.fileMode false
           mkdir -p releases
           rm -f releases/*.jar
           for jar in build/libs/*.jar; do
@@ -64,5 +66,5 @@ jobs:
           fi
           # [skip ci] stops this commit from starting another run.
           git commit -m "Update built jar [skip ci]"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
