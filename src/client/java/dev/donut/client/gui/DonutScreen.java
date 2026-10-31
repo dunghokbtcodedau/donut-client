@@ -477,7 +477,7 @@ public final class DonutScreen extends Screen {
         settingToggle(g, "buildLava", "Avoid lava", sy, () -> b.lavaGuard, () -> b.lavaGuard = !b.lavaGuard); sy += 23;
         settingToggle(g, "buildHome", "/home " + b.homeSlot + " when stuck", sy, () -> b.autoHome, () -> b.autoHome = !b.autoHome); sy += 23;
         settingToggle(g, "buildSetHome", "/sethome " + b.homeSlot + " above layer, break supports", sy, () -> b.autoSetHome, () -> b.autoSetHome = !b.autoSetHome); sy += 23;
-        settingToggle(g, "buildRotate", "Auto rotate, place by packet", sy, () -> b.autoRotate, () -> b.autoRotate = !b.autoRotate); sy += 23;
+        settingToggle(g, "buildRotate", "Silent rotate, place by packet", sy, () -> b.autoRotate, () -> b.autoRotate = !b.autoRotate); sy += 23;
         settingToggle(g, "buildAbove", "Always stand above the layer", sy, () -> b.alwaysAbove, () -> b.alwaysAbove = !b.alwaysAbove); sy += 23;
         settingToggle(g, "buildRestock", "Refill: lava /home " + b.lavaHomeSlot + ", water /home " + b.waterHomeSlot, sy, () -> b.autoRestock, () -> b.autoRestock = !b.autoRestock);
     }
