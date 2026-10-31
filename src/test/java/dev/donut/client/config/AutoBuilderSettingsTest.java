@@ -23,9 +23,20 @@ class AutoBuilderSettingsTest {
         assertTrue(loaded.autoBuilder.favorite);
         assertEquals(.53, loaded.autoBuilder.previewOpacity);
         var saved = JsonParser.parseString(Files.readString(path)).getAsJsonObject().getAsJsonObject("autoBuilder");
-        assertEquals(2, saved.size(), "Only presentation preferences may persist");
+        assertEquals(7, saved.size(), "Only preferences may persist, never activation or position");
         assertFalse(saved.has("enabled"));
         assertFalse(saved.has("origin"));
+    }
+
+    @Test void safetyPreferencesDefaultOnAndHomeSlotIsClamped() throws IOException {
+        AutoBuilderSettings settings = new AutoBuilderSettings();
+        assertTrue(settings.pillarUp && settings.lavaGuard && settings.autoHome && settings.autoSetHome);
+        assertEquals(3, settings.homeSlot);
+        Path path = directory.resolve("donut.json");
+        Files.writeString(path, "{\"autoBuilder\":{\"homeSlot\":0}}");
+        assertEquals(1, new ConfigStore(path).load().autoBuilder.homeSlot);
+        Files.writeString(path, "{\"autoBuilder\":{\"homeSlot\":999}}");
+        assertEquals(100, new ConfigStore(path).load().autoBuilder.homeSlot);
     }
 
     @Test void existingAndNullConfigurationsRestoreUsablePreferences() throws IOException {
