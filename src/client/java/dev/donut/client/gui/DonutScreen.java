@@ -476,7 +476,7 @@ public final class DonutScreen extends Screen {
         settingToggle(g, "buildPillar", "Pillar up to high blocks", sy, () -> b.pillarUp, () -> b.pillarUp = !b.pillarUp); sy += 23;
         settingToggle(g, "buildLava", "Avoid lava", sy, () -> b.lavaGuard, () -> b.lavaGuard = !b.lavaGuard); sy += 23;
         settingToggle(g, "buildHome", "/home " + b.homeSlot + " when stuck", sy, () -> b.autoHome, () -> b.autoHome = !b.autoHome); sy += 23;
-        settingToggle(g, "buildSetHome", "/sethome " + b.homeSlot + " above layer, then break supports, /home", sy, () -> b.autoSetHome, () -> b.autoSetHome = !b.autoSetHome); sy += 23;
+        settingToggle(g, "buildSetHome", "/sethome " + b.homeSlot + " above layer, break supports", sy, () -> b.autoSetHome, () -> b.autoSetHome = !b.autoSetHome); sy += 23;
         settingToggle(g, "buildAbove", "Always stand above the layer", sy, () -> b.alwaysAbove, () -> b.alwaysAbove = !b.alwaysAbove); sy += 23;
         settingToggle(g, "buildRestock", "Refill: lava /home " + b.lavaHomeSlot + ", water /home " + b.waterHomeSlot, sy, () -> b.autoRestock, () -> b.autoRestock = !b.autoRestock);
     }
