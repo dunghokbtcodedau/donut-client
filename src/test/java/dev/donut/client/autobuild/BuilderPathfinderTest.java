@@ -34,4 +34,22 @@ class BuilderPathfinderTest {
         Cell end=new Cell(1000,1,0);
         assertTrue(BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,200,8).isEmpty());
     }
+    @Test void cutsDiagonallyWhenOnlyTheDiagonalCellIsStandable() {
+        var terrain=new BuilderPathfinder.Terrain() {
+            public boolean standable(Cell p) { return p.equals(new Cell(0,1,0)) || p.equals(new Cell(1,1,1)); }
+            public boolean headroom(Cell p) { return true; }
+        };
+        Cell end=new Cell(1,1,1);
+        var path=BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,40,5);
+        assertEquals(java.util.List.of(end),path);
+    }
+    @Test void terrainCanForbidADiagonal() {
+        var terrain=new BuilderPathfinder.Terrain() {
+            public boolean standable(Cell p) { return p.equals(new Cell(0,1,0)) || p.equals(new Cell(1,1,1)); }
+            public boolean headroom(Cell p) { return true; }
+            public boolean standableDiagonal(Cell from, Cell to) { return false; }
+        };
+        Cell end=new Cell(1,1,1);
+        assertTrue(BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,40,5).isEmpty());
+    }
 }
