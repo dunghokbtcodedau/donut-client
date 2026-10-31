@@ -5,10 +5,8 @@ public final class AutoBuilderSettings {
     public boolean favorite = false;
     public double previewOpacity = .28;
 
-    /** Last resort once stuck: jump and place a temporary block under the feet. If that fails, /home is used. */
+    /** Climb to blocks that are too high by jumping and placing a temporary block under the feet. */
     public boolean pillarUp = true;
-    /** Allow parkour: sprint-jump across 1-2 block gaps and hop up/down single blocks while walking to a build spot. */
-    public boolean parkour = true;
     /** Leave lava alone: avoid walking next to it and use /home when the player ends up inside it. */
     public boolean lavaGuard = true;
     /** Run /home when the builder makes no progress for 30 seconds. */
@@ -19,9 +17,8 @@ public final class AutoBuilderSettings {
      */
     public boolean autoSetHome = true;
     /**
-     * Silent rotation, only for directional blocks (facing/axis/rotation) and buckets: the yaw/pitch ride on the
-     * regular movement packet of that tick and the vanilla placement follows. Other blocks are placed without any
-     * rotation change. Off: nothing is turned at all.
+     * Turn to face the block (and look down while climbing) before placing, then send the placement packet. Off: the
+     * player is not turned at all and the placement packet is sent from wherever it already faces.
      */
     public boolean autoRotate = true;
     /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
