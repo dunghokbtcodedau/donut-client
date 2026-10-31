@@ -13,11 +13,22 @@ public final class AutoBuilderSettings {
     public boolean autoHome = true;
     /** Run /sethome after each finished layer, once the player stands on the next one. */
     public boolean autoSetHome = true;
-    /** Home slot used by /home and /sethome. */
+    /** Home slot used by /home and /sethome (the build site). */
     public int homeSlot = 3;
+    /**
+     * When the lava or water buckets run out: /sethome at the build, /home to the supply, find and scoop with
+     * Baritone, then /home back to the build.
+     */
+    public boolean autoRestock = true;
+    /** Home next to lava (where lava buckets are filled). */
+    public int lavaHomeSlot = 2;
+    /** Home next to water (where water buckets are filled). */
+    public int waterHomeSlot = 1;
 
     public void sanitize() {
         homeSlot = Math.clamp(homeSlot, 1, 100);
+        lavaHomeSlot = Math.clamp(lavaHomeSlot, 1, 100);
+        waterHomeSlot = Math.clamp(waterHomeSlot, 1, 100);
         previewOpacity = Double.isFinite(previewOpacity) ? Math.clamp(previewOpacity, .08, .8) : .28;
     }
 }
