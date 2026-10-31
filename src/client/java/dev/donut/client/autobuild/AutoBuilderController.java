@@ -5,6 +5,7 @@ import dev.donut.client.freecam.FreecamController;
 import dev.donut.client.mixin.BuilderClientLevelAccessor;
 import dev.donut.client.mixin.BuilderLocalPlayerAccessor;
 import java.util.*;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.*;
@@ -32,6 +33,8 @@ public final class AutoBuilderController {
     private final NavigableSet<Target> work = new TreeSet<>(Comparator.comparingInt((Target t)->t.pos.getY()).thenComparingInt(Target::index));
     private final Map<BlockPos, Integer> indices = new HashMap<>();
     private final BitSet correct = new BitSet();
+    /** Blocks the builder can never place (flowing fluids, grown or lit states). They never hold a layer back. */
+    private final BitSet skipped = new BitSet();
     private final Map<BlockPos, Integer> failures = new HashMap<>();
     private final Set<BlockPos> deferred = new HashSet<>();
     private final Set<BlockPos> supportBlocks = new HashSet<>();
@@ -43,6 +46,9 @@ public final class AutoBuilderController {
     private int tick, scanIndex, cooldown, noProgress, revalidateIndex, finalCheckIndex, originalSlot = -1;
     private boolean scanned;
     private String lastFailure = "";
+    private BuilderProgressStore progressStore;
+    private int lastSavedCount = -1;
+    private String restored = "";
 
     // ---- safety, climbing and recovery state
     private static final int STUCK_TICKS = 20 * 30, HOME_WAIT_TICKS = 20 * 15, HOME_COOLDOWN_TICKS = 20 * 3;
@@ -53,6 +59,9 @@ public final class AutoBuilderController {
     private int layerY = Integer.MIN_VALUE, homeLayer = Integer.MIN_VALUE, setHomeUntil = -1;
     private boolean pendingSetHome;
     private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
+    private double groundY = Double.NaN;
+    private int lastFallTick = -100000;
+    private static final int FALL_BLOCKS = 3, FALL_MEMORY_TICKS = 20 * 30;
     private int progressBlocks = -1, progressSupports = -1, progressTick, stuckRecoveries, homeWaitUntil = -1, lastHomeTick = -100000;
 
     private static final class Pillar {
@@ -84,6 +93,7 @@ public final class AutoBuilderController {
         pillar = null; layerY = Integer.MIN_VALUE; homeLayer = Integer.MIN_VALUE; pendingSetHome = false; setHomeUntil = -1;
         progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
         homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
+        groundY = Double.NaN; lastFallTick = -100000;
     }
     public Schematic schematic() { return schematic; }
     public PlacementTransform transform() { return transform; }
@@ -93,22 +103,120 @@ public final class AutoBuilderController {
     public String reason() { return reason; }
     public boolean isRunning() { return status == Status.RUNNING; }
     public int confirmedBlocks() { return correct.cardinality(); }
-    public double progress() { return targets.isEmpty() ? 0 : (double)correct.cardinality()/targets.size(); }
+    public double progress() { int total=totalBlocks(); return total<=0 ? (targets.isEmpty() ? 0 : 1) : (double)correct.cardinality()/total; }
+    public int skippedBlocks() { return skipped.cardinality(); }
     public int supportsPlaced() { return supportBlocks.size(); }
+    /** Blocks the builder is responsible for: everything except the ones it must skip. */
+    public int totalBlocks() { return targets.size()-skipped.cardinality(); }
+
+    // ---------------------------------------------------------------- saved progress
+
+    private BuilderProgressStore store() {
+        if (progressStore == null) {
+            try { progressStore = new BuilderProgressStore(FabricLoader.getInstance().getConfigDir().resolve("donut-client").resolve("builder-progress")); }
+            catch (RuntimeException | LinkageError e) { return null; }
+        }
+        return progressStore;
+    }
+
+    /** Every confirmed block, grouped by layer. Temporary supports are never recorded. */
+    private BuilderProgressStore.Snapshot snapshot() {
+        TreeMap<Integer, List<int[]>> layers = new TreeMap<>();
+        for (int i = correct.nextSetBit(0); i >= 0; i = correct.nextSetBit(i + 1)) {
+            Target target = byIndex[i];
+            if (target != null) layers.computeIfAbsent(target.pos.getY(), key -> new ArrayList<>()).add(new int[]{target.pos.getX(), target.pos.getZ()});
+        }
+        BlockPos size = schematic.dimensions(), origin = transform.origin();
+        return new BuilderProgressStore.Snapshot(schematic.name(), schematic.blocks().size(), new int[]{size.getX(), size.getY(), size.getZ()},
+                new int[]{origin.getX(), origin.getY(), origin.getZ()}, transform.quarterTurns(), transform.mirrorX(),
+                correct.cardinality(), totalBlocks(), layers);
+    }
+
+    /** Never replaces an existing file with an empty result, so a wrong position cannot wipe saved progress. */
+    public void saveProgress() {
+        if (schematic == null || targets.isEmpty() || correct.isEmpty()) return;
+        BuilderProgressStore store = store();
+        if (store == null) return;
+        store.save(snapshot());
+        lastSavedCount = correct.cardinality();
+    }
+
+    /** Reads the file again (it may have been edited) when it belongs to the current schematic and position. */
+    private boolean loadProgress() {
+        restored = "";
+        if (schematic == null || targets.isEmpty()) return false;
+        BuilderProgressStore store = store();
+        if (store == null) return false;
+        BuilderProgressStore.Snapshot saved = store.load(schematic.name(), schematic.blocks().size());
+        BlockPos origin = transform.origin();
+        if (saved == null || !Arrays.equals(saved.origin(), new int[]{origin.getX(), origin.getY(), origin.getZ()})
+                || saved.quarterTurns() != transform.quarterTurns() || saved.mirrorX() != transform.mirrorX()) return false;
+        correct.clear();
+        for (var layer : saved.layers().entrySet())
+            for (int[] column : layer.getValue()) {
+                Integer index = indices.get(new BlockPos(column[0], layer.getKey(), column[1]));
+                if (index != null && !skipped.get(index)) correct.set(index);
+            }
+        rebuildWork();
+        lastSavedCount = correct.cardinality();
+        restored = " Restored " + Math.round(progress() * 100) + "% from saved progress.";
+        return true;
+    }
+
+    /**
+     * Forgets everything recorded for the current schematic and position and deletes its progress file.
+     * Blocks already standing in the world are not touched; Start counts the matching ones again.
+     */
+    public void clearProgress() {
+        if (schematic == null) return;
+        correct.clear(); // first, so cancel() has nothing to save
+        cancel();
+        BuilderProgressStore store = store();
+        if (store != null) store.delete(schematic.name(), schematic.blocks().size());
+        unconfirmed.clear(); failures.clear(); deferred.clear(); supportBlocks.clear();
+        scanIndex = 0; scanned = false; revalidateIndex = 0; finalCheckIndex = 0; lastSavedCount = -1; restored = "";
+        rebuildWork();
+        status = Status.READY;
+        reason = "Progress cleared. Start checks the world again and builds what is missing.";
+    }
+
+    private void rebuildWork() {
+        work.clear();
+        for (Target target : targets) if (!correct.get(target.index) && !skipped.get(target.index)) work.add(target);
+    }
+
+    /** States no player action can create by placing a block, so waiting for them would block a layer forever. */
+    private static boolean neverPlaceable(BlockState state) {
+        if ((state.getBlock() instanceof LiquidBlock) && state.getValue(LiquidBlock.LEVEL)!=0) return true; // flowing water/lava
+        for (var property:state.getProperties()) {
+            if ((property.getName().equals("age") || property.getName().equals("stage"))
+                    && state.getValue(property) instanceof Integer age && age>0) return true; // grown
+        }
+        return state.getBlock() instanceof CandleBlock && state.getValue(BlockStateProperties.LIT);
+    }
+
+    /** Position stored with this schematic's saved progress, or null when nothing was saved. */
+    public PlacementTransform savedTransform() {
+        if (schematic == null) return null;
+        BuilderProgressStore store = store();
+        BuilderProgressStore.Snapshot saved = store == null ? null : store.load(schematic.name(), schematic.blocks().size());
+        if (saved == null || saved.origin().length < 3) return null;
+        return new PlacementTransform(new BlockPos(saved.origin()[0], saved.origin()[1], saved.origin()[2]), saved.quarterTurns(), saved.mirrorX());
+    }
 
     public void setSchematic(Schematic value) {
         cancel(); schematic = value; rebuildTargets(); previewVisible = value != null;
         status = value == null ? Status.IDLE : Status.READY;
-        reason = value == null ? "Choose a schematic." : "Position the preview, then Start.";
+        reason = value == null ? "Choose a schematic." : "Position the preview, then Start." + restored;
     }
     public void setTransform(PlacementTransform value) {
         if (transform.equals(value)) return;
         cancel(); transform = Objects.requireNonNull(value); rebuildTargets();
-        status = schematic == null ? Status.IDLE : Status.READY; reason = "Position updated.";
+        status = schematic == null ? Status.IDLE : Status.READY; reason = "Position updated." + restored;
     }
     private void rebuildTargets() {
         indices.clear(); correct.clear(); failures.clear(); deferred.clear(); supportBlocks.clear(); scanIndex=0; scanned=false;
-        work.clear(); revalidateIndex=0; finalCheckIndex=0;
+        work.clear(); skipped.clear(); revalidateIndex=0; finalCheckIndex=0;
         if (schematic == null) { targets=List.of(); byIndex=new Target[0]; return; }
         List<Target> values = new ArrayList<>(schematic.blocks().size());
         for (Schematic.Block block : schematic.blocks()) {
@@ -120,7 +228,11 @@ public final class AutoBuilderController {
                 .thenComparingInt(t -> MaterialTracker.isSecondary(t.state) ? 2 : t.state.getBlock() instanceof FallingBlock ? 1 : 0));
         targets=List.copyOf(values); byIndex=new Target[values.size()];
         for (Target target:values) byIndex[target.index]=target;
-        work.addAll(values);
+        skipped.clear();
+        for (Target target:values) if (neverPlaceable(target.state)) skipped.set(target.index);
+        rebuildWork();
+        lastSavedCount=-1;
+        loadProgress();
     }
     public void start() {
         Minecraft client=Minecraft.getInstance();
@@ -128,8 +240,11 @@ public final class AutoBuilderController {
         if (!canRun(client)) return;
         if (predictionLevel!=client.level) { unconfirmed.clear(); supportBlocks.clear(); predictionLevel=client.level; }
         cleanup.reset(client);
-        correct.clear(); failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
-        work.clear(); work.addAll(targets); revalidateIndex=0; finalCheckIndex=0;
+        failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
+        // Saved progress is read again here so an edited file takes effect; the world scan then confirms every block.
+        loadProgress();
+        rebuildWork();
+        revalidateIndex=0; finalCheckIndex=0;
         session=client.level; tick=0; noProgress=0; lastFailure=""; current=null; pending=null; prepared=null; resetSafety();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; previewVisible=true;
         reason="Checking loaded blocks...";
@@ -137,6 +252,7 @@ public final class AutoBuilderController {
     public void pause() { pauseWith("Paused by you."); }
     private void pauseWith(String message) {
         if (status != Status.RUNNING && status != Status.PAUSED) { reason=message; return; }
+        saveProgress();
         status=Status.PAUSED; reason=message; prepared=null; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
     }
@@ -146,7 +262,8 @@ public final class AutoBuilderController {
         if (!canRun(client)) return;
         if (session != client.level) { start(); return; }
         failures.clear(); deferred.clear(); lastFailure=""; noProgress=0; current=null; prepared=null; navigator.reset(); resetSafety();
-        work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+        loadProgress();
+        rebuildWork();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; reason="Resuming...";
     }
     private boolean canRun(Minecraft client) {
@@ -158,15 +275,18 @@ public final class AutoBuilderController {
         return true;
     }
     public void cancel() {
+        saveProgress();
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
         failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
     }
     public void disconnect() {
+        saveProgress();
         if (isRunning() || status==Status.PAUSED) { pauseWith("Disconnected. Rejoin, check the position, then Resume."); }
         navigator.reset(); restoreSlot(); session=null; pending=null; prepared=null; current=null; correct.clear(); scanIndex=0; scanned=false;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); unconfirmed.clear(); predictionLevel=null;
         previewVisible=false;
+        loadProgress();
     }
     private void restoreSlot() {
         var player=Minecraft.getInstance().player;
@@ -177,6 +297,7 @@ public final class AutoBuilderController {
     public void tick(Minecraft client) {
         if (!isRunning()) return;
         tick++;
+        if (tick%200==0 && correct.cardinality()!=lastSavedCount) saveProgress();
         for (var key:List.of(client.options.keyAttack,client.options.keyUse,client.options.keyDrop,client.options.keySwapOffhand)) {
             key.setDown(false); while (key.consumeClick()) { }
         }
@@ -186,6 +307,7 @@ public final class AutoBuilderController {
         if (!client.player.isAlive() || client.player.isRemoved()) { pauseWith("Player unavailable. Resume after respawning."); return; }
         if (client.player.isPassenger()) { pauseWith("Leave the vehicle, then Resume."); return; }
         if (client.player.isUsingItem()) { pauseWith("Finish using the held item, then Resume."); return; }
+        trackFall(client);
         if (lavaEscape(client)) return;
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
@@ -206,19 +328,23 @@ public final class AutoBuilderController {
             int end=Math.min(targets.size(),scanIndex+2048);
             for (;scanIndex<end;scanIndex++) {
                 Target target=targets.get(scanIndex);
+                if (skipped.get(target.index)) continue;
                 if (client.level.isOutsideBuildHeight(target.pos)) { pauseWith("Outside world build height at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
                 if (!client.level.getWorldBorder().isWithinBounds(target.pos)) { pauseWith("Outside the world border at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
-                if (!unconfirmed.containsKey(target.pos) && MaterialTracker.isLoaded(client.level,target.pos)
-                        && MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) markCorrect(target);
+                if (!unconfirmed.containsKey(target.pos) && MaterialTracker.isLoaded(client.level,target.pos)) {
+                    if (MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) markCorrect(target);
+                    else if (correct.get(target.index)) { correct.clear(target.index); work.add(target); } // saved as placed, but gone
+                }
             }
             if (scanIndex<targets.size()) return;
             scanned=true;
         }
-        if (correct.cardinality()==targets.size()) {
+        if (correct.cardinality()>=totalBlocks()) {
             navigator.release(); reason="Verifying the completed structure...";
             int end=Math.min(targets.size(),finalCheckIndex+2048);
             for (;finalCheckIndex<end;finalCheckIndex++) {
                 Target target=targets.get(finalCheckIndex);
+                if (skipped.get(target.index)) continue;
                 if (unconfirmed.containsKey(target.pos) || !MaterialTracker.isLoaded(client.level,target.pos)
                         || !MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) {
                     correct.clear(target.index); work.add(target); finalCheckIndex=0; return;
@@ -294,6 +420,7 @@ public final class AutoBuilderController {
         if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; }
         else if (movement==BuilderNavigator.Result.NO_PATH) {
             if (startPillar(client)) return;
+            if (strandedHome(client,"Fell down with nowhere to walk")) return;
             defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
         }
         else if (movement==BuilderNavigator.Result.STUCK) { noProgress+=30; }
@@ -301,6 +428,7 @@ public final class AutoBuilderController {
         reason="Walking to " + coordinates(current.pos) + " / " + navigator.routeLength() + " steps";
         if (noProgress>300) {
             if (startPillar(client)) return;
+            if (strandedHome(client,"Cannot get back to the build")) return;
             defer("Cannot reach a valid placement face or orientation at " + coordinates(current.pos) + ". Provide access, then Resume.");
         }
     }
@@ -316,14 +444,16 @@ public final class AutoBuilderController {
         }
     }
 
-    /** /sethome once the player stands on the new layer. Returns true while it is waiting to do so. */
+    /** /sethome once the player stands one block above the new layer. Returns true while it is waiting to do so. */
     private boolean trySetHome(Minecraft client) {
         var player=client.player;
         if (tick>setHomeUntil) { pendingSetHome=false; return false; }
-        if (!player.onGround() || player.getY()<layerY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
+        // The home goes one block above the layer being built (where the climb ends), never inside the layer itself.
+        int homeY=layerY+1;
+        if (!player.onGround() || player.getY()<homeY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
         player.connection.sendCommand("sethome " + settings.homeSlot);
         pendingSetHome=false; cooldown=10;
-        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + layerY;
+        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + homeY + " (layer Y=" + layerY + " + 1)";
         return true;
     }
 
@@ -359,10 +489,36 @@ public final class AutoBuilderController {
         if (!settings.autoHome) { pauseWith("No progress for 30 seconds. Move the player, then Resume."); return true; }
         if (stuckRecoveries>=3) { pauseWith("Still stuck after /home " + settings.homeSlot + " three times. Check the build, then Resume."); return true; }
         stuckRecoveries++;
+        beginHome(client,"Stuck");
+        return true;
+    }
+
+    private void beginHome(Minecraft client, String why) {
         sendHome(client);
         homeFrom=client.player.position(); homeWaitUntil=tick+HOME_WAIT_TICKS;
         pillar=null; current=null; prepared=null; pending=null; unconfirmed.clear();
-        reason="Stuck, using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
+        reason=why + ", using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
+    }
+
+    /** Remembers the last time the player dropped several blocks to a lower floor. */
+    private void trackFall(Minecraft client) {
+        var player=client.player;
+        if (!player.onGround()) return;
+        if (!Double.isNaN(groundY) && groundY-player.getY()>=FALL_BLOCKS) lastFallTick=tick;
+        groundY=player.getY();
+    }
+
+    /**
+     * The player fell below the build (or is well under the block it needs) and no route, pillar or
+     * placement face is available: go to /home right away instead of waiting 30 s or giving up.
+     */
+    private boolean strandedHome(Minecraft client, String why) {
+        if (!settings.autoHome || stuckRecoveries>=3 || current==null) return false;
+        boolean fell=tick-lastFallTick<FALL_MEMORY_TICKS;
+        boolean below=current.pos.getY()-client.player.getY()>=FALL_BLOCKS;
+        if (!fell && !below) return false;
+        stuckRecoveries++;
+        beginHome(client,why);
         return true;
     }
 
@@ -373,7 +529,7 @@ public final class AutoBuilderController {
         if (client.player.position().distanceToSqr(homeFrom)>16) {
             homeWaitUntil=-1; navigator.reset();
             failures.clear(); deferred.clear(); work.clear();
-            for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+            rebuildWork();
             scanIndex=0; scanned=false; revalidateIndex=0; finalCheckIndex=0; noProgress=0; cooldown=40;
             progressAnchor=null; progressTick=tick;
             reason="Back at home " + settings.homeSlot + ", checking the build and continuing...";
@@ -401,11 +557,13 @@ public final class AutoBuilderController {
 
     /**
      * Jump, and once the feet are a full block higher, place a block into the cell just left and land on it.
-     * Repeats until the target is within reach, so one pillar never rises past the layer being built.
+     * Repeats until the feet are one block above the layer being built, and never climbs past that.
      */
     private boolean pillarTick(Minecraft client) {
         Pillar p=pillar; var player=client.player;
-        if (!settings.pillarUp || p.goal.pos.getY()-player.getY()<1.6) { pillar=null; navigator.reset(); return false; }
+        // Keep stacking until the player stands one block ABOVE the layer being built (feet at layer Y+1, resting on a
+        // block at layer Y). Only then does construction resume; a jump in mid-air never counts as having arrived.
+        if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()+1-.05)) { pillar=null; navigator.reset(); return false; }
         if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
         player.setXRot(90f);
@@ -460,17 +618,46 @@ public final class AutoBuilderController {
         return new PlacementPlanner.Plan(plan.hit(),plan.prediction(),client.player.getYRot(),90f,false);
     }
 
+    /** Y of the lowest layer that still has a block the server has not confirmed, deferred blocks included. */
+    private int lowestIncompleteY() {
+        for (Target target:targets) if (!correct.get(target.index) && !skipped.get(target.index)) return target.pos.getY();
+        return Integer.MIN_VALUE;
+    }
+    /**
+     * A lava source is only poured once every block around it (the four horizontal neighbours; above and below do not
+     * count) that the schematic contains is confirmed, so the lava never spills before its container exists.
+     * Neighbouring fluids are ignored, otherwise two touching lava blocks would wait for each other forever.
+     */
+    private boolean lavaWaitsForFrame(Target target) {
+        if (target.support || !target.state.is(Blocks.LAVA)) return false;
+        for (Direction side:Direction.Plane.HORIZONTAL) {
+            Integer index=indices.get(target.pos.relative(side));
+            if (index==null || skipped.get(index) || correct.get(index)) continue;
+            BlockState neighbor=byIndex[index].state;
+            if (neighbor.is(Blocks.LAVA) || neighbor.is(Blocks.WATER)) continue;
+            return true;
+        }
+        return false;
+    }
     private Target chooseTarget(Minecraft client) {
         Target best=null; double bestScore=Double.POSITIVE_INFINITY;
         if (work.isEmpty()) return null;
-        int minimumY=work.first().pos.getY(), examined=0;
-        noteLayer(minimumY);
-        // A layer is finished completely before any block of the next one is chosen.
+        // The layer is decided by what is still unbuilt, not by what is currently placeable, so a block that was
+        // put aside can never let the builder climb to the next layer.
+        int layer=lowestIncompleteY(), examined=0;
+        if (layer==Integer.MIN_VALUE) return null;
+        noteLayer(layer);
         for (Target target:work) {
-            if (++examined>256 || target.pos.getY()>minimumY) break;
+            if (target.pos.getY()<layer) continue;
+            if (target.pos.getY()>layer || ++examined>256) break;
+            if (lavaWaitsForFrame(target)) continue;
             double score=client.player.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(target.pos))
-                    + (target.pos.getY()-minimumY)*64 + (MaterialTracker.isSecondary(target.state)?512:0);
+                    + (MaterialTracker.isSecondary(target.state)?512:0);
             if (score<bestScore) { bestScore=score; best=target; }
+        }
+        if (best==null) {
+            lastFailure="Layer Y=" + layer + " cannot be finished yet. " + (lastFailure.isEmpty()
+                    ? "Check unloaded areas, supports and occupied positions." : lastFailure);
         }
         return best;
     }
@@ -478,8 +665,11 @@ public final class AutoBuilderController {
         for (int checked=0;checked<Math.min(budget,targets.size());checked++) {
             if (revalidateIndex>=targets.size()) revalidateIndex=0;
             Target target=targets.get(revalidateIndex++);
+            if (skipped.get(target.index)) continue;
             if (unconfirmed.containsKey(target.pos) || (pending!=null && pending.target.pos.equals(target.pos))) continue;
-            boolean matches=MaterialTracker.isLoaded(client.level,target.pos) && MaterialTracker.matches(target.state,client.level.getBlockState(target.pos));
+            // A block that cannot be checked right now keeps its saved state; the final check still verifies it.
+            if (!MaterialTracker.isLoaded(client.level,target.pos)) continue;
+            boolean matches=MaterialTracker.matches(target.state,client.level.getBlockState(target.pos));
             if (matches) markCorrect(target);
             else if (correct.get(target.index)) { correct.clear(target.index); if (!deferred.contains(target.pos)) work.add(target); }
         }
@@ -529,7 +719,7 @@ public final class AutoBuilderController {
         unconfirmed.remove(pos);
         if (session==null) return;
         Integer index=indices.get(pos);
-        if (index!=null) {
+        if (index!=null && !skipped.get(index)) {
             // Index refers to the original list, not its sorted order.
             BlockState desired=transform.apply(schematic.blocks().get(index).state());
             if (MaterialTracker.matches(desired,state)) { markCorrect(byIndex[index]); deferred.remove(pos); }
@@ -576,8 +766,9 @@ public final class AutoBuilderController {
         deferred.add(current.pos); work.remove(current); current=null; noProgress=0; navigator.reset();
     }
     private void complete() {
+        saveProgress();
         status=Status.COMPLETED; navigator.reset(); restoreSlot(); current=null;
-        reason="Complete: " + correct.cardinality() + " blocks confirmed." + (supportBlocks.isEmpty()?"":" " + supportBlocks.size() + " temporary cobbled-deepslate supports were kept where removal was unsafe or unconfirmed.");
+        reason="Complete: " + correct.cardinality() + " blocks confirmed." + (skipped.isEmpty()?"":" " + skipped.cardinality() + " flowing, grown or lit blocks were skipped because they cannot be placed.") + (supportBlocks.isEmpty()?"":" " + supportBlocks.size() + " temporary cobbled-deepslate supports were kept where removal was unsafe or unconfirmed.");
         if (schematic.blocks().stream().anyMatch(block->block.blockEntity()!=null)) reason += " Stored block-entity data needs server support.";
     }
     private static String coordinates(BlockPos pos) { return pos.getX()+", "+pos.getY()+", "+pos.getZ(); }
