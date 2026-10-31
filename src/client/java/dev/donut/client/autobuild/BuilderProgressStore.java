@@ -75,6 +75,16 @@ public final class BuilderProgressStore {
         }
     }
 
+    /** Removes the saved progress for this schematic. Backups of other positions are left alone. */
+    public void delete(String schematic, int blocks) {
+        Path path = file(schematic, blocks);
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            LOGGER.error("Could not delete builder progress {}", path, e);
+        }
+    }
+
     /** Writes atomically. Progress recorded for a different position is kept as a .backup file, never discarded. */
     public void save(Snapshot snapshot) {
         Path path = file(snapshot.schematic(), snapshot.blocks());

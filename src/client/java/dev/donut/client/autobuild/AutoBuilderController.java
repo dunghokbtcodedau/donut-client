@@ -159,6 +159,23 @@ public final class AutoBuilderController {
         return true;
     }
 
+    /**
+     * Forgets everything recorded for the current schematic and position and deletes its progress file.
+     * Blocks already standing in the world are not touched; Start counts the matching ones again.
+     */
+    public void clearProgress() {
+        if (schematic == null) return;
+        correct.clear(); // first, so cancel() has nothing to save
+        cancel();
+        BuilderProgressStore store = store();
+        if (store != null) store.delete(schematic.name(), schematic.blocks().size());
+        unconfirmed.clear(); failures.clear(); deferred.clear(); supportBlocks.clear();
+        scanIndex = 0; scanned = false; revalidateIndex = 0; finalCheckIndex = 0; lastSavedCount = -1; restored = "";
+        rebuildWork();
+        status = Status.READY;
+        reason = "Progress cleared. Start checks the world again and builds what is missing.";
+    }
+
     private void rebuildWork() {
         work.clear();
         for (Target target : targets) if (!correct.get(target.index) && !skipped.get(target.index)) work.add(target);
