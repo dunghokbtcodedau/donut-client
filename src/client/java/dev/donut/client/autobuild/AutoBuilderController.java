@@ -91,6 +91,9 @@ public final class AutoBuilderController {
 
     private record Target(BlockPos pos, BlockState state, int index, boolean support) { }
     private record Prepared(Target target, PlacementPlanner.Plan plan, int readyTick) { }
+    /** A placement whose silent rotation is riding on this tick's movement packet; it is sent in endTick. */
+    private record Committed(Target target, PlacementPlanner.Plan plan) { }
+    private Committed committed;
     private static final class Pending {
         final Target target;
         final BlockState before, predicted;
@@ -329,7 +332,7 @@ public final class AutoBuilderController {
     private void pauseWith(String message) {
         if (status != Status.RUNNING && status != Status.PAUSED) { reason=message; return; }
         saveProgress();
-        status=Status.PAUSED; reason=message; prepared=null; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
+        status=Status.PAUSED; reason=message; prepared=null; dropCommit(); pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
         if (restock.active()) { try { BaritoneLink.cancel(); } catch (RuntimeException | LinkageError ignored) { } }
     }
@@ -354,7 +357,7 @@ public final class AutoBuilderController {
     public void cancel() {
         saveProgress();
         restock.reset(); restockFails=0; wrap=Wrap.NONE; wrapCell=null;
-        cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
+        dropCommit(); cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
         failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
     }
@@ -362,7 +365,7 @@ public final class AutoBuilderController {
         saveProgress();
         if (isRunning() || status==Status.PAUSED) { pauseWith("Disconnected. Rejoin, check the position, then Resume."); }
         restock.reset();
-        navigator.reset(); restoreSlot(); session=null; pending=null; prepared=null; current=null; correct.clear(); scanIndex=0; scanned=false;
+        dropCommit(); navigator.reset(); restoreSlot(); session=null; pending=null; prepared=null; current=null; correct.clear(); scanIndex=0; scanned=false;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); unconfirmed.clear(); predictionLevel=null;
         previewVisible=false;
         loadProgress();
@@ -401,7 +404,6 @@ public final class AutoBuilderController {
         }
         if (prepared != null) {
             navigator.hold(client,shouldSneak(client,prepared.target,prepared.plan));
-            aim(client,prepared.plan);
             if (tick>=prepared.readyTick) sendPrepared(client);
             return;
         }
@@ -499,7 +501,6 @@ public final class AutoBuilderController {
         var plan=belowLayer ? null : PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
         if (plan != null) {
             navigator.hold(client,shouldSneak(client,current,plan));
-            if (settings.autoRotate) aim(client,plan);
             prepared=new Prepared(current,plan,tick+2);
             reason=(current.support ? "Placing a temporary support" : plan.configure() ? "Setting block state" : "Placing block") + " at " + coordinates(current.pos);
             noProgress=0; return;
@@ -806,7 +807,6 @@ public final class AutoBuilderController {
         if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()+1-.05)) { pillar=null; navigator.reset(); return false; }
         if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
-        if (settings.autoRotate) player.setXRot(90f);
         if (player.onGround()) {
             if (p.airborne) { // just landed
                 p.airborne=false;
@@ -832,11 +832,9 @@ public final class AutoBuilderController {
                 cooldown=2; reason="Moving material into the hotbar..."; return true;
             }
             player.getInventory().setSelectedSlot(slot);
-            // The look-down has to be sent before the jump so the click can follow without another rotation.
-            if (!settings.autoRotate || Math.abs(((BuilderLocalPlayerAccessor)player).donut$lastSentPitch()-90f)<.5f) {
-                p.base=feet.immutable(); p.airborne=true;
-                navigator.jump(client);
-            }
+            // No look-down: the block under the feet is placed with a silent pitch of 90 on that tick's movement packet.
+            p.base=feet.immutable(); p.airborne=true;
+            navigator.jump(client);
             reason="Climbing to " + coordinates(p.goal.pos);
             return true;
         }
@@ -947,22 +945,57 @@ public final class AutoBuilderController {
         plan=pillarAim(client,plan);
         boolean sneak=shouldSneak(client,current,plan);
         navigator.hold(client,sneak);
-        if (settings.autoRotate) aim(client,plan);
         var sent=(BuilderLocalPlayerAccessor)client.player;
-        // Let vanilla send rotation/input once per client tick before the interaction. An extra
+        // Let vanilla send the sneak input once per client tick before the interaction. An extra
         // movement packet here duplicates LocalPlayer.sendPosition and violates strict packet ordering.
-        boolean rotationOff=settings.autoRotate && (Math.abs(net.minecraft.util.Mth.wrapDegrees(sent.donut$lastSentYaw()-plan.yaw()))>.001f
-                || Math.abs(sent.donut$lastSentPitch()-plan.pitch())>.001f);
-        if (rotationOff
-                || sent.donut$lastSentInput()==null || sent.donut$lastSentInput().shift()!=sneak) {
+        if (sent.donut$lastSentInput()==null || sent.donut$lastSentInput().shift()!=sneak) {
             prepared=new Prepared(current,plan,tick+1);
             reason="Aligning for placement at " + coordinates(current.pos);
             return;
         }
+        if (settings.autoRotate) {
+            // Silent rotation: this tick's regular movement packet carries the placement's yaw/pitch (the camera
+            // does not turn) and the placement itself follows at the end of the tick, see endTick.
+            SilentRotation.queue(plan.yaw(),plan.pitch());
+            committed=new Committed(current,plan);
+            reason="Placing at " + coordinates(current.pos);
+            return;
+        }
+        place(client,plan,false);
+    }
+
+    /** End of the client tick: the movement packet with the silent rotation has been sent, now place. */
+    public void endTick(Minecraft client) {
+        Committed action=committed;
+        if (action==null) return;
+        committed=null;
+        boolean carried=SilentRotation.finish();
+        if (!isRunning() || client.player==null || client.level==null || client.gameMode==null || client.level!=session
+                || client.screen!=null || !action.target.equals(current) || pending!=null) return;
+        if (!carried) { // no movement packet went out this tick; try again next tick
+            prepared=new Prepared(action.target,action.plan,tick+1);
+            reason="Aligning for placement at " + coordinates(action.target.pos);
+            return;
+        }
+        place(client,action.plan,true);
+    }
+
+    private void dropCommit() { committed=null; SilentRotation.cancel(); }
+
+    /** Buckets read the player's rotation in useItem, so it is set around that call only (never left changed). */
+    private net.minecraft.world.InteractionResult useBucket(Minecraft client,PlacementPlanner.Plan plan,boolean silent) {
+        var player=client.player;
+        float yaw=player.getYRot(), pitch=player.getXRot();
+        if (silent) { player.setYRot(plan.yaw()); player.setXRot(plan.pitch()); }
+        try { return client.gameMode.useItem(player,InteractionHand.MAIN_HAND); }
+        finally { if (silent) { player.setYRot(yaw); player.setXRot(pitch); } }
+    }
+
+    private void place(Minecraft client,PlacementPlanner.Plan plan,boolean silent) {
         BlockState before=client.level.getBlockState(current.pos);
         // Buckets use vanilla POV raycasts in useItem, not BlockItem/useItemOn.
         var result=FluidPlacement.isBucket(client.player.getMainHandItem())
-                ? client.gameMode.useItem(client.player,InteractionHand.MAIN_HAND)
+                ? useBucket(client,plan,silent)
                 : client.gameMode.useItemOn(client.player,InteractionHand.MAIN_HAND,plan.hit());
         int sequence=((BuilderClientLevelAccessor)client.level).donut$predictionHandler().currentSequence();
         unconfirmed.put(current.pos,sequence);
@@ -971,9 +1004,6 @@ public final class AutoBuilderController {
         pending=new Pending(current,before,plan.prediction(),tick,sequence);
         if (result.consumesAction()) client.player.swing(InteractionHand.MAIN_HAND);
         reason="Waiting for the server at " + coordinates(current.pos);
-    }
-    private static void aim(Minecraft client,PlacementPlanner.Plan plan) {
-        client.player.setYRot(plan.yaw()); client.player.setXRot(plan.pitch());
     }
     public void serverBlockUpdate(BlockPos pos,BlockState state) {
         cleanup.serverBlockUpdate(pos,state,supportBlocks);
@@ -992,7 +1022,7 @@ public final class AutoBuilderController {
         unconfirmed.entrySet().removeIf(entry->entry.getValue()<=sequence);
         if (pending!=null && sequence>=pending.sequence) pending.acknowledged=true;
     }
-    public void positionCorrected() { if (isRunning()) { cleanup.reset(Minecraft.getInstance()); navigator.replan(); prepared=null; reason="Server corrected the position. Replanning..."; } }
+    public void positionCorrected() { if (isRunning()) { dropCommit(); cleanup.reset(Minecraft.getInstance()); navigator.replan(); prepared=null; reason="Server corrected the position. Replanning..."; } }
     private void finishPending(Minecraft client) {
         Pending action=pending;
         if (!action.acknowledged && action.observed==null) {
