@@ -33,6 +33,8 @@ public final class AutoBuilderController {
     private final NavigableSet<Target> work = new TreeSet<>(Comparator.comparingInt((Target t)->t.pos.getY()).thenComparingInt(Target::index));
     private final Map<BlockPos, Integer> indices = new HashMap<>();
     private final BitSet correct = new BitSet();
+    /** Blocks the builder can never place (flowing fluids, grown or lit states). They never hold a layer back. */
+    private final BitSet skipped = new BitSet();
     private final Map<BlockPos, Integer> failures = new HashMap<>();
     private final Set<BlockPos> deferred = new HashSet<>();
     private final Set<BlockPos> supportBlocks = new HashSet<>();
@@ -97,9 +99,11 @@ public final class AutoBuilderController {
     public String reason() { return reason; }
     public boolean isRunning() { return status == Status.RUNNING; }
     public int confirmedBlocks() { return correct.cardinality(); }
-    public double progress() { return targets.isEmpty() ? 0 : (double)correct.cardinality()/targets.size(); }
+    public double progress() { int total=totalBlocks(); return total<=0 ? (targets.isEmpty() ? 0 : 1) : (double)correct.cardinality()/total; }
+    public int skippedBlocks() { return skipped.cardinality(); }
     public int supportsPlaced() { return supportBlocks.size(); }
-    public int totalBlocks() { return targets.size(); }
+    /** Blocks the builder is responsible for: everything except the ones it must skip. */
+    public int totalBlocks() { return targets.size()-skipped.cardinality(); }
 
     // ---------------------------------------------------------------- saved progress
 
@@ -121,7 +125,7 @@ public final class AutoBuilderController {
         BlockPos size = schematic.dimensions(), origin = transform.origin();
         return new BuilderProgressStore.Snapshot(schematic.name(), schematic.blocks().size(), new int[]{size.getX(), size.getY(), size.getZ()},
                 new int[]{origin.getX(), origin.getY(), origin.getZ()}, transform.quarterTurns(), transform.mirrorX(),
-                correct.cardinality(), targets.size(), layers);
+                correct.cardinality(), totalBlocks(), layers);
     }
 
     /** Never replaces an existing file with an empty result, so a wrong position cannot wipe saved progress. */
@@ -147,13 +151,27 @@ public final class AutoBuilderController {
         for (var layer : saved.layers().entrySet())
             for (int[] column : layer.getValue()) {
                 Integer index = indices.get(new BlockPos(column[0], layer.getKey(), column[1]));
-                if (index != null) correct.set(index);
+                if (index != null && !skipped.get(index)) correct.set(index);
             }
-        work.clear();
-        for (Target target : targets) if (!correct.get(target.index)) work.add(target);
+        rebuildWork();
         lastSavedCount = correct.cardinality();
         restored = " Restored " + Math.round(progress() * 100) + "% from saved progress.";
         return true;
+    }
+
+    private void rebuildWork() {
+        work.clear();
+        for (Target target : targets) if (!correct.get(target.index) && !skipped.get(target.index)) work.add(target);
+    }
+
+    /** States no player action can create by placing a block, so waiting for them would block a layer forever. */
+    private static boolean neverPlaceable(BlockState state) {
+        if ((state.getBlock() instanceof LiquidBlock) && state.getValue(LiquidBlock.LEVEL)!=0) return true; // flowing water/lava
+        for (var property:state.getProperties()) {
+            if ((property.getName().equals("age") || property.getName().equals("stage"))
+                    && state.getValue(property) instanceof Integer age && age>0) return true; // grown
+        }
+        return state.getBlock() instanceof CandleBlock && state.getValue(BlockStateProperties.LIT);
     }
 
     /** Position stored with this schematic's saved progress, or null when nothing was saved. */
@@ -177,7 +195,7 @@ public final class AutoBuilderController {
     }
     private void rebuildTargets() {
         indices.clear(); correct.clear(); failures.clear(); deferred.clear(); supportBlocks.clear(); scanIndex=0; scanned=false;
-        work.clear(); revalidateIndex=0; finalCheckIndex=0;
+        work.clear(); skipped.clear(); revalidateIndex=0; finalCheckIndex=0;
         if (schematic == null) { targets=List.of(); byIndex=new Target[0]; return; }
         List<Target> values = new ArrayList<>(schematic.blocks().size());
         for (Schematic.Block block : schematic.blocks()) {
@@ -189,7 +207,9 @@ public final class AutoBuilderController {
                 .thenComparingInt(t -> MaterialTracker.isSecondary(t.state) ? 2 : t.state.getBlock() instanceof FallingBlock ? 1 : 0));
         targets=List.copyOf(values); byIndex=new Target[values.size()];
         for (Target target:values) byIndex[target.index]=target;
-        work.addAll(values);
+        skipped.clear();
+        for (Target target:values) if (neverPlaceable(target.state)) skipped.set(target.index);
+        rebuildWork();
         lastSavedCount=-1;
         loadProgress();
     }
@@ -202,7 +222,7 @@ public final class AutoBuilderController {
         failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
         // Saved progress is read again here so an edited file takes effect; the world scan then confirms every block.
         loadProgress();
-        work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+        rebuildWork();
         revalidateIndex=0; finalCheckIndex=0;
         session=client.level; tick=0; noProgress=0; lastFailure=""; current=null; pending=null; prepared=null; resetSafety();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; previewVisible=true;
@@ -222,7 +242,7 @@ public final class AutoBuilderController {
         if (session != client.level) { start(); return; }
         failures.clear(); deferred.clear(); lastFailure=""; noProgress=0; current=null; prepared=null; navigator.reset(); resetSafety();
         loadProgress();
-        work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+        rebuildWork();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; reason="Resuming...";
     }
     private boolean canRun(Minecraft client) {
@@ -286,6 +306,7 @@ public final class AutoBuilderController {
             int end=Math.min(targets.size(),scanIndex+2048);
             for (;scanIndex<end;scanIndex++) {
                 Target target=targets.get(scanIndex);
+                if (skipped.get(target.index)) continue;
                 if (client.level.isOutsideBuildHeight(target.pos)) { pauseWith("Outside world build height at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
                 if (!client.level.getWorldBorder().isWithinBounds(target.pos)) { pauseWith("Outside the world border at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
                 if (!unconfirmed.containsKey(target.pos) && MaterialTracker.isLoaded(client.level,target.pos)) {
@@ -296,11 +317,12 @@ public final class AutoBuilderController {
             if (scanIndex<targets.size()) return;
             scanned=true;
         }
-        if (correct.cardinality()==targets.size()) {
+        if (correct.cardinality()>=totalBlocks()) {
             navigator.release(); reason="Verifying the completed structure...";
             int end=Math.min(targets.size(),finalCheckIndex+2048);
             for (;finalCheckIndex<end;finalCheckIndex++) {
                 Target target=targets.get(finalCheckIndex);
+                if (skipped.get(target.index)) continue;
                 if (unconfirmed.containsKey(target.pos) || !MaterialTracker.isLoaded(client.level,target.pos)
                         || !MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) {
                     correct.clear(target.index); work.add(target); finalCheckIndex=0; return;
@@ -455,7 +477,7 @@ public final class AutoBuilderController {
         if (client.player.position().distanceToSqr(homeFrom)>16) {
             homeWaitUntil=-1; navigator.reset();
             failures.clear(); deferred.clear(); work.clear();
-            for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+            rebuildWork();
             scanIndex=0; scanned=false; revalidateIndex=0; finalCheckIndex=0; noProgress=0; cooldown=40;
             progressAnchor=null; progressTick=tick;
             reason="Back at home " + settings.homeSlot + ", checking the build and continuing...";
@@ -544,7 +566,7 @@ public final class AutoBuilderController {
 
     /** Y of the lowest layer that still has a block the server has not confirmed, deferred blocks included. */
     private int lowestIncompleteY() {
-        for (Target target:targets) if (!correct.get(target.index)) return target.pos.getY();
+        for (Target target:targets) if (!correct.get(target.index) && !skipped.get(target.index)) return target.pos.getY();
         return Integer.MIN_VALUE;
     }
     private Target chooseTarget(Minecraft client) {
@@ -572,6 +594,7 @@ public final class AutoBuilderController {
         for (int checked=0;checked<Math.min(budget,targets.size());checked++) {
             if (revalidateIndex>=targets.size()) revalidateIndex=0;
             Target target=targets.get(revalidateIndex++);
+            if (skipped.get(target.index)) continue;
             if (unconfirmed.containsKey(target.pos) || (pending!=null && pending.target.pos.equals(target.pos))) continue;
             // A block that cannot be checked right now keeps its saved state; the final check still verifies it.
             if (!MaterialTracker.isLoaded(client.level,target.pos)) continue;
@@ -625,7 +648,7 @@ public final class AutoBuilderController {
         unconfirmed.remove(pos);
         if (session==null) return;
         Integer index=indices.get(pos);
-        if (index!=null) {
+        if (index!=null && !skipped.get(index)) {
             // Index refers to the original list, not its sorted order.
             BlockState desired=transform.apply(schematic.blocks().get(index).state());
             if (MaterialTracker.matches(desired,state)) { markCorrect(byIndex[index]); deferred.remove(pos); }
@@ -674,7 +697,7 @@ public final class AutoBuilderController {
     private void complete() {
         saveProgress();
         status=Status.COMPLETED; navigator.reset(); restoreSlot(); current=null;
-        reason="Complete: " + correct.cardinality() + " blocks confirmed." + (supportBlocks.isEmpty()?"":" " + supportBlocks.size() + " temporary cobbled-deepslate supports were kept where removal was unsafe or unconfirmed.");
+        reason="Complete: " + correct.cardinality() + " blocks confirmed." + (skipped.isEmpty()?"":" " + skipped.cardinality() + " flowing, grown or lit blocks were skipped because they cannot be placed.") + (supportBlocks.isEmpty()?"":" " + supportBlocks.size() + " temporary cobbled-deepslate supports were kept where removal was unsafe or unconfirmed.");
         if (schematic.blocks().stream().anyMatch(block->block.blockEntity()!=null)) reason += " Stored block-entity data needs server support.";
     }
     private static String coordinates(BlockPos pos) { return pos.getX()+", "+pos.getY()+", "+pos.getZ(); }
