@@ -70,6 +70,21 @@ jobs:
 
           for attempt in 1 2 3; do
             git fetch origin "${GITHUB_REF_NAME}"
+
+            # Never let an older run overwrite a newer one. If the branch now contains a change
+            # outside releases/ that this run did not build, this jar is stale: skip it, because
+            # the run for that newer commit builds and commits the correct jar.
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/${GITHUB_REF_NAME}"; then
+              echo "Branch was rewritten since this run started; skipping jar commit."
+              exit 0
+            fi
+            newer=$(git diff --name-only "${GITHUB_SHA}" "origin/${GITHUB_REF_NAME}" -- . ':(exclude)releases')
+            if [ -n "$newer" ]; then
+              echo "Newer source commits exist, this jar is stale; skipping jar commit:"
+              echo "$newer"
+              exit 0
+            fi
+
             git reset --hard "origin/${GITHUB_REF_NAME}"
             mkdir -p releases
             rm -f releases/*.jar
