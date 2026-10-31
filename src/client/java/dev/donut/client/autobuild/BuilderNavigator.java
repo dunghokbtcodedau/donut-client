@@ -5,6 +5,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.ClientInput;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Blocks;
@@ -125,13 +126,28 @@ public final class BuilderNavigator {
         steering.forward = true;
         steering.jump = next.y() > client.player.getY()+.25 && client.player.onGround();
         // Squeezing past a lava corner: hop so the body clears the lava surface instead of brushing it.
-        if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) steering.jump = true;
+        boolean cornerHop = false;
+        if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) { steering.jump = true; cornerHop = true; }
+        // Within half a block of lava: hold shift so the player cannot slip over an edge. Not while hopping a lava
+        // corner (sneaking would cut the hop short) and not when the next step is a drop (sneaking refuses drops).
+        steering.sneak = !cornerHop && next.y() >= client.player.blockPosition().getY() && lavaWithinHalfBlock(client);
         steering.tick();
         if (lastPosition != null && client.player.position().distanceToSqr(lastPosition) < .0004) stalled++;
         else stalled = 0;
         lastPosition = client.player.position();
         if (stalled > 30) { rejectCurrent(client); return Result.STUCK; }
         return Result.MOVING;
+    }
+
+    /** Lava in a cell that touches the player's hitbox grown by 0.5 block, from one level below the feet to head height. */
+    private boolean lavaWithinHalfBlock(Minecraft client) {
+        AABB box = client.player.getBoundingBox().inflate(.5, 0, .5);
+        int y = client.player.blockPosition().getY();
+        for (BlockPos at : BlockPos.betweenClosed(Mth.floor(box.minX), y - 1, Mth.floor(box.minZ),
+                Mth.floor(box.maxX), y + 1, Mth.floor(box.maxZ))) {
+            if (MaterialTracker.isLoaded(client.level, at) && LavaGuard.lava(client.level, at)) return true;
+        }
+        return false;
     }
 
     private static final int CORNER_FREE = 0, CORNER_SOLID = 1, CORNER_LAVA = 2;

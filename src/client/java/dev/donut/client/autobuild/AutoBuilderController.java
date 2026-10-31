@@ -555,13 +555,13 @@ public final class AutoBuilderController {
 
     /**
      * Jump, and once the feet are a full block higher, place a block into the cell just left and land on it.
-     * Repeats until the feet are level with the layer being built, and never climbs past it.
+     * Repeats until the feet are one block above the layer being built, and never climbs past that.
      */
     private boolean pillarTick(Minecraft client) {
         Pillar p=pillar; var player=client.player;
-        // Keep stacking until the player actually stands at the layer being built (feet level with it, resting on the
-        // block below). Only then does construction resume; a jump in mid-air never counts as having arrived.
-        if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()-.05)) { pillar=null; navigator.reset(); return false; }
+        // Keep stacking until the player stands one block ABOVE the layer being built (feet at layer Y+1, resting on a
+        // block at layer Y). Only then does construction resume; a jump in mid-air never counts as having arrived.
+        if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()+1-.05)) { pillar=null; navigator.reset(); return false; }
         if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
         player.setXRot(90f);
@@ -621,6 +621,22 @@ public final class AutoBuilderController {
         for (Target target:targets) if (!correct.get(target.index) && !skipped.get(target.index)) return target.pos.getY();
         return Integer.MIN_VALUE;
     }
+    /**
+     * A lava source is only poured once every block around it (the four horizontal neighbours; above and below do not
+     * count) that the schematic contains is confirmed, so the lava never spills before its container exists.
+     * Neighbouring fluids are ignored, otherwise two touching lava blocks would wait for each other forever.
+     */
+    private boolean lavaWaitsForFrame(Target target) {
+        if (target.support || !target.state.is(Blocks.LAVA)) return false;
+        for (Direction side:Direction.Plane.HORIZONTAL) {
+            Integer index=indices.get(target.pos.relative(side));
+            if (index==null || skipped.get(index) || correct.get(index)) continue;
+            BlockState neighbor=byIndex[index].state;
+            if (neighbor.is(Blocks.LAVA) || neighbor.is(Blocks.WATER)) continue;
+            return true;
+        }
+        return false;
+    }
     private Target chooseTarget(Minecraft client) {
         Target best=null; double bestScore=Double.POSITIVE_INFINITY;
         if (work.isEmpty()) return null;
@@ -632,6 +648,7 @@ public final class AutoBuilderController {
         for (Target target:work) {
             if (target.pos.getY()<layer) continue;
             if (target.pos.getY()>layer || ++examined>256) break;
+            if (lavaWaitsForFrame(target)) continue;
             double score=client.player.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(target.pos))
                     + (MaterialTracker.isSecondary(target.state)?512:0);
             if (score<bestScore) { bestScore=score; best=target; }
