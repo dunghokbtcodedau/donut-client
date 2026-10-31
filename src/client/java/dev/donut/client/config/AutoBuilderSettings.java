@@ -5,7 +5,7 @@ public final class AutoBuilderSettings {
     public boolean favorite = false;
     public double previewOpacity = .28;
 
-    /** Climb to blocks that are too high by jumping and placing a temporary block under the feet. */
+    /** Last resort once stuck: jump and place a temporary block under the feet. If that fails, /home is used. */
     public boolean pillarUp = true;
     /** Allow parkour: sprint-jump across 1-2 block gaps and hop up/down single blocks while walking to a build spot. */
     public boolean parkour = true;
@@ -19,9 +19,9 @@ public final class AutoBuilderSettings {
      */
     public boolean autoSetHome = true;
     /**
-     * Silent rotation: the camera never turns. The yaw/pitch needed for the placement ride on the regular movement
-     * packet of that tick and the placement packet follows it. Off: nothing is spoofed or turned at all and the
-     * placement packet is sent from wherever the player already faces.
+     * Silent rotation, only for directional blocks (facing/axis/rotation) and buckets: the yaw/pitch ride on the
+     * regular movement packet of that tick and the vanilla placement follows. Other blocks are placed without any
+     * rotation change. Off: nothing is turned at all.
      */
     public boolean autoRotate = true;
     /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
