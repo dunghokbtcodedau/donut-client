@@ -12,8 +12,8 @@ public final class AutoBuilderSettings {
     /** Run /home when the builder makes no progress for 30 seconds. */
     public boolean autoHome = true;
     /**
-     * At the end of each layer: /sethome on top of it (one block above), break the temporary supports, then /home
-     * back to that spot.
+     * /sethome one block above the layer being built, and at the end of each layer break the temporary supports.
+     * /home is used only when the player falls or is stuck.
      */
     public boolean autoSetHome = true;
     /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
