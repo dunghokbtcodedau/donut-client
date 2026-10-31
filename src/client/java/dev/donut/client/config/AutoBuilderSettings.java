@@ -19,8 +19,9 @@ public final class AutoBuilderSettings {
      */
     public boolean autoSetHome = true;
     /**
-     * Turn to face the block (and look down while climbing) before placing, then send the placement packet. Off: the
-     * player is not turned at all and the placement packet is sent from wherever it already faces.
+     * Silent rotation: the camera never turns. The yaw/pitch needed for the placement ride on the regular movement
+     * packet of that tick and the placement packet follows it. Off: nothing is spoofed or turned at all and the
+     * placement packet is sent from wherever the player already faces.
      */
     public boolean autoRotate = true;
     /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
