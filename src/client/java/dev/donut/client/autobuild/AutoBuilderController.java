@@ -5,6 +5,7 @@ import dev.donut.client.freecam.FreecamController;
 import dev.donut.client.mixin.BuilderClientLevelAccessor;
 import dev.donut.client.mixin.BuilderLocalPlayerAccessor;
 import java.util.*;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.*;
@@ -43,6 +44,9 @@ public final class AutoBuilderController {
     private int tick, scanIndex, cooldown, noProgress, revalidateIndex, finalCheckIndex, originalSlot = -1;
     private boolean scanned;
     private String lastFailure = "";
+    private BuilderProgressStore progressStore;
+    private int lastSavedCount = -1;
+    private String restored = "";
 
     // ---- safety, climbing and recovery state
     private static final int STUCK_TICKS = 20 * 30, HOME_WAIT_TICKS = 20 * 15, HOME_COOLDOWN_TICKS = 20 * 3;
@@ -95,16 +99,81 @@ public final class AutoBuilderController {
     public int confirmedBlocks() { return correct.cardinality(); }
     public double progress() { return targets.isEmpty() ? 0 : (double)correct.cardinality()/targets.size(); }
     public int supportsPlaced() { return supportBlocks.size(); }
+    public int totalBlocks() { return targets.size(); }
+
+    // ---------------------------------------------------------------- saved progress
+
+    private BuilderProgressStore store() {
+        if (progressStore == null) {
+            try { progressStore = new BuilderProgressStore(FabricLoader.getInstance().getConfigDir().resolve("donut-client").resolve("builder-progress")); }
+            catch (RuntimeException | LinkageError e) { return null; }
+        }
+        return progressStore;
+    }
+
+    /** Every confirmed block, grouped by layer. Temporary supports are never recorded. */
+    private BuilderProgressStore.Snapshot snapshot() {
+        TreeMap<Integer, List<int[]>> layers = new TreeMap<>();
+        for (int i = correct.nextSetBit(0); i >= 0; i = correct.nextSetBit(i + 1)) {
+            Target target = byIndex[i];
+            if (target != null) layers.computeIfAbsent(target.pos.getY(), key -> new ArrayList<>()).add(new int[]{target.pos.getX(), target.pos.getZ()});
+        }
+        BlockPos size = schematic.dimensions(), origin = transform.origin();
+        return new BuilderProgressStore.Snapshot(schematic.name(), schematic.blocks().size(), new int[]{size.getX(), size.getY(), size.getZ()},
+                new int[]{origin.getX(), origin.getY(), origin.getZ()}, transform.quarterTurns(), transform.mirrorX(),
+                correct.cardinality(), targets.size(), layers);
+    }
+
+    /** Never replaces an existing file with an empty result, so a wrong position cannot wipe saved progress. */
+    public void saveProgress() {
+        if (schematic == null || targets.isEmpty() || correct.isEmpty()) return;
+        BuilderProgressStore store = store();
+        if (store == null) return;
+        store.save(snapshot());
+        lastSavedCount = correct.cardinality();
+    }
+
+    /** Reads the file again (it may have been edited) when it belongs to the current schematic and position. */
+    private boolean loadProgress() {
+        restored = "";
+        if (schematic == null || targets.isEmpty()) return false;
+        BuilderProgressStore store = store();
+        if (store == null) return false;
+        BuilderProgressStore.Snapshot saved = store.load(schematic.name(), schematic.blocks().size());
+        BlockPos origin = transform.origin();
+        if (saved == null || !Arrays.equals(saved.origin(), new int[]{origin.getX(), origin.getY(), origin.getZ()})
+                || saved.quarterTurns() != transform.quarterTurns() || saved.mirrorX() != transform.mirrorX()) return false;
+        correct.clear();
+        for (var layer : saved.layers().entrySet())
+            for (int[] column : layer.getValue()) {
+                Integer index = indices.get(new BlockPos(column[0], layer.getKey(), column[1]));
+                if (index != null) correct.set(index);
+            }
+        work.clear();
+        for (Target target : targets) if (!correct.get(target.index)) work.add(target);
+        lastSavedCount = correct.cardinality();
+        restored = " Restored " + Math.round(progress() * 100) + "% from saved progress.";
+        return true;
+    }
+
+    /** Position stored with this schematic's saved progress, or null when nothing was saved. */
+    public PlacementTransform savedTransform() {
+        if (schematic == null) return null;
+        BuilderProgressStore store = store();
+        BuilderProgressStore.Snapshot saved = store == null ? null : store.load(schematic.name(), schematic.blocks().size());
+        if (saved == null || saved.origin().length < 3) return null;
+        return new PlacementTransform(new BlockPos(saved.origin()[0], saved.origin()[1], saved.origin()[2]), saved.quarterTurns(), saved.mirrorX());
+    }
 
     public void setSchematic(Schematic value) {
         cancel(); schematic = value; rebuildTargets(); previewVisible = value != null;
         status = value == null ? Status.IDLE : Status.READY;
-        reason = value == null ? "Choose a schematic." : "Position the preview, then Start.";
+        reason = value == null ? "Choose a schematic." : "Position the preview, then Start." + restored;
     }
     public void setTransform(PlacementTransform value) {
         if (transform.equals(value)) return;
         cancel(); transform = Objects.requireNonNull(value); rebuildTargets();
-        status = schematic == null ? Status.IDLE : Status.READY; reason = "Position updated.";
+        status = schematic == null ? Status.IDLE : Status.READY; reason = "Position updated." + restored;
     }
     private void rebuildTargets() {
         indices.clear(); correct.clear(); failures.clear(); deferred.clear(); supportBlocks.clear(); scanIndex=0; scanned=false;
@@ -121,6 +190,8 @@ public final class AutoBuilderController {
         targets=List.copyOf(values); byIndex=new Target[values.size()];
         for (Target target:values) byIndex[target.index]=target;
         work.addAll(values);
+        lastSavedCount=-1;
+        loadProgress();
     }
     public void start() {
         Minecraft client=Minecraft.getInstance();
@@ -128,8 +199,11 @@ public final class AutoBuilderController {
         if (!canRun(client)) return;
         if (predictionLevel!=client.level) { unconfirmed.clear(); supportBlocks.clear(); predictionLevel=client.level; }
         cleanup.reset(client);
-        correct.clear(); failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
-        work.clear(); work.addAll(targets); revalidateIndex=0; finalCheckIndex=0;
+        failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
+        // Saved progress is read again here so an edited file takes effect; the world scan then confirms every block.
+        loadProgress();
+        work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+        revalidateIndex=0; finalCheckIndex=0;
         session=client.level; tick=0; noProgress=0; lastFailure=""; current=null; pending=null; prepared=null; resetSafety();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; previewVisible=true;
         reason="Checking loaded blocks...";
@@ -137,6 +211,7 @@ public final class AutoBuilderController {
     public void pause() { pauseWith("Paused by you."); }
     private void pauseWith(String message) {
         if (status != Status.RUNNING && status != Status.PAUSED) { reason=message; return; }
+        saveProgress();
         status=Status.PAUSED; reason=message; prepared=null; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
     }
@@ -146,6 +221,7 @@ public final class AutoBuilderController {
         if (!canRun(client)) return;
         if (session != client.level) { start(); return; }
         failures.clear(); deferred.clear(); lastFailure=""; noProgress=0; current=null; prepared=null; navigator.reset(); resetSafety();
+        loadProgress();
         work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; reason="Resuming...";
     }
@@ -158,15 +234,18 @@ public final class AutoBuilderController {
         return true;
     }
     public void cancel() {
+        saveProgress();
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
         failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
     }
     public void disconnect() {
+        saveProgress();
         if (isRunning() || status==Status.PAUSED) { pauseWith("Disconnected. Rejoin, check the position, then Resume."); }
         navigator.reset(); restoreSlot(); session=null; pending=null; prepared=null; current=null; correct.clear(); scanIndex=0; scanned=false;
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); unconfirmed.clear(); predictionLevel=null;
         previewVisible=false;
+        loadProgress();
     }
     private void restoreSlot() {
         var player=Minecraft.getInstance().player;
@@ -177,6 +256,7 @@ public final class AutoBuilderController {
     public void tick(Minecraft client) {
         if (!isRunning()) return;
         tick++;
+        if (tick%200==0 && correct.cardinality()!=lastSavedCount) saveProgress();
         for (var key:List.of(client.options.keyAttack,client.options.keyUse,client.options.keyDrop,client.options.keySwapOffhand)) {
             key.setDown(false); while (key.consumeClick()) { }
         }
@@ -208,8 +288,10 @@ public final class AutoBuilderController {
                 Target target=targets.get(scanIndex);
                 if (client.level.isOutsideBuildHeight(target.pos)) { pauseWith("Outside world build height at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
                 if (!client.level.getWorldBorder().isWithinBounds(target.pos)) { pauseWith("Outside the world border at " + coordinates(target.pos) + ". Reposition the schematic."); return; }
-                if (!unconfirmed.containsKey(target.pos) && MaterialTracker.isLoaded(client.level,target.pos)
-                        && MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) markCorrect(target);
+                if (!unconfirmed.containsKey(target.pos) && MaterialTracker.isLoaded(client.level,target.pos)) {
+                    if (MaterialTracker.matches(target.state,client.level.getBlockState(target.pos))) markCorrect(target);
+                    else if (correct.get(target.index)) { correct.clear(target.index); work.add(target); } // saved as placed, but gone
+                }
             }
             if (scanIndex<targets.size()) return;
             scanned=true;
@@ -491,7 +573,9 @@ public final class AutoBuilderController {
             if (revalidateIndex>=targets.size()) revalidateIndex=0;
             Target target=targets.get(revalidateIndex++);
             if (unconfirmed.containsKey(target.pos) || (pending!=null && pending.target.pos.equals(target.pos))) continue;
-            boolean matches=MaterialTracker.isLoaded(client.level,target.pos) && MaterialTracker.matches(target.state,client.level.getBlockState(target.pos));
+            // A block that cannot be checked right now keeps its saved state; the final check still verifies it.
+            if (!MaterialTracker.isLoaded(client.level,target.pos)) continue;
+            boolean matches=MaterialTracker.matches(target.state,client.level.getBlockState(target.pos));
             if (matches) markCorrect(target);
             else if (correct.get(target.index)) { correct.clear(target.index); if (!deferred.contains(target.pos)) work.add(target); }
         }
@@ -588,6 +672,7 @@ public final class AutoBuilderController {
         deferred.add(current.pos); work.remove(current); current=null; noProgress=0; navigator.reset();
     }
     private void complete() {
+        saveProgress();
         status=Status.COMPLETED; navigator.reset(); restoreSlot(); current=null;
         reason="Complete: " + correct.cardinality() + " blocks confirmed." + (supportBlocks.isEmpty()?"":" " + supportBlocks.size() + " temporary cobbled-deepslate supports were kept where removal was unsafe or unconfirmed.");
         if (schematic.blocks().stream().anyMatch(block->block.blockEntity()!=null)) reason += " Stored block-entity data needs server support.";
