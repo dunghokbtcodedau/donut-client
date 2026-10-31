@@ -13,6 +13,8 @@ public final class BuilderPathfinder {
         boolean standable(Cell cell);
         /** Jumping up requires clearance over the departure block too. */
         boolean headroom(Cell cell);
+        /** A diagonal step on the same level; corner cells are the two cells the step cuts across. */
+        default boolean standableDiagonal(Cell from, Cell to) { return standable(to); }
     }
     private record Entry(Cell cell, double score) { }
     private BuilderPathfinder() { }
@@ -25,7 +27,7 @@ public final class BuilderPathfinder {
         Set<Cell> closed = new HashSet<>();
         costs.put(start, 0d);
         open.add(new Entry(start, start.distance(target)));
-        int[][] axes = {{1,0},{-1,0},{0,1},{0,-1}};
+        int[][] axes = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
         while (!open.isEmpty() && closed.size() < maxVisited) {
             Cell current = open.remove().cell;
             if (!closed.add(current)) continue;
@@ -35,13 +37,15 @@ public final class BuilderPathfinder {
                 return List.copyOf(route);
             }
             for (int[] axis : axes) {
-                for (int dy : new int[]{0, 1, -1}) {
+                boolean diagonal = axis[0] != 0 && axis[1] != 0;
+                for (int dy : diagonal ? new int[]{0} : new int[]{0, 1, -1}) {
                     Cell next = current.offset(axis[0], dy, axis[1]);
                     if (Math.abs(next.x-start.x) > maxDistance || Math.abs(next.z-start.z) > maxDistance
-                            || Math.abs(next.y-start.y) > 24 || closed.contains(next) || !terrain.standable(next)) continue;
+                            || Math.abs(next.y-start.y) > 24 || closed.contains(next)
+                            || !(diagonal ? terrain.standableDiagonal(current, next) : terrain.standable(next))) continue;
                     if (dy > 0 && !terrain.headroom(current.offset(0, 1, 0))) continue;
                     if (dy < 0 && !terrain.headroom(next.offset(0, 1, 0))) continue;
-                    double cost = costs.get(current) + (dy == 0 ? 1 : 1.45);
+                    double cost = costs.get(current) + (diagonal ? 1.42 : dy == 0 ? 1 : 1.45);
                     if (cost >= costs.getOrDefault(next, Double.POSITIVE_INFINITY)) continue;
                     costs.put(next, cost);
                     previous.put(next, current);

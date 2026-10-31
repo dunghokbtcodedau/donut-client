@@ -79,6 +79,24 @@ public final class BuilderNavigator {
                             || !ground.isCollisionShapeFullBlock(client.level, pos.below())) return false;
                     return headroom(at);
                 }
+                @Override public boolean standableDiagonal(BuilderPathfinder.Cell from, BuilderPathfinder.Cell to) {
+                    BlockPos a = pos(from), b = pos(to);
+                    BlockPos c1 = new BlockPos(b.getX(), a.getY(), a.getZ()), c2 = new BlockPos(a.getX(), a.getY(), b.getZ());
+                    int k1 = cornerKind(client, c1), k2 = cornerKind(client, c2);
+                    if (!diagonalAllowed(k1, k2)) return false;
+                    if (k1 != CORNER_LAVA && k2 != CORNER_LAVA) return standable(to);
+                    return standableIgnoringLava(to, c1, c2);
+                }
+                private boolean standableIgnoringLava(BuilderPathfinder.Cell at, BlockPos ignoreA, BlockPos ignoreB) {
+                    BlockPos pos = pos(at);
+                    if (!MaterialTracker.isLoaded(client.level,pos) || !MaterialTracker.isLoaded(client.level,pos.above(2))) return false;
+                    if (LavaGuard.nearIgnoring(client.level, pos, ignoreA, ignoreB)) return false;
+                    var ground = client.level.getBlockState(pos.below());
+                    if (ground.is(Blocks.MAGMA_BLOCK) || ground.is(Blocks.CAMPFIRE) || ground.is(Blocks.SOUL_CAMPFIRE)
+                            || ground.is(Blocks.CACTUS) || ground.is(Blocks.POWDER_SNOW)
+                            || !ground.isCollisionShapeFullBlock(client.level, pos.below())) return false;
+                    return headroom(at);
+                }
                 @Override public boolean headroom(BuilderPathfinder.Cell at) {
                     BlockPos pos = pos(at);
                     if (!MaterialTracker.isLoaded(client.level,pos) || !client.level.getFluidState(pos).isEmpty()
@@ -106,12 +124,45 @@ public final class BuilderNavigator {
         client.player.setXRot(10);
         steering.forward = true;
         steering.jump = next.y() > client.player.getY()+.25 && client.player.onGround();
+        // Squeezing past a lava corner: hop so the body clears the lava surface instead of brushing it.
+        if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) steering.jump = true;
         steering.tick();
         if (lastPosition != null && client.player.position().distanceToSqr(lastPosition) < .0004) stalled++;
         else stalled = 0;
         lastPosition = client.player.position();
         if (stalled > 30) { rejectCurrent(client); return Result.STUCK; }
         return Result.MOVING;
+    }
+
+    private static final int CORNER_FREE = 0, CORNER_SOLID = 1, CORNER_LAVA = 2;
+
+    /** What a corner cell of a diagonal step is: open, a solid block, or lava (unloaded counts as solid). */
+    private int cornerKind(Minecraft client, BlockPos pos) {
+        if (!MaterialTracker.isLoaded(client.level, pos)) return CORNER_SOLID;
+        if (avoidLava && (LavaGuard.lava(client.level, pos) || LavaGuard.lava(client.level, pos.above()))) return CORNER_LAVA;
+        for (int dy = 0; dy <= 1; dy++) {
+            BlockPos at = pos.above(dy);
+            if (!client.level.getBlockState(at).getCollisionShape(client.level, at).isEmpty()) return CORNER_SOLID;
+        }
+        return CORNER_FREE;
+    }
+
+    /**
+     * A diagonal step is fine with two open corners or one open and one solid corner (the body slides past).
+     * Two solid corners are a closed gap. A lava corner is only crossed when the opposite corner is a solid block.
+     */
+    private static boolean diagonalAllowed(int k1, int k2) {
+        if (k1 == CORNER_SOLID && k2 == CORNER_SOLID) return false;
+        if (k1 == CORNER_LAVA || k2 == CORNER_LAVA) return k1 == CORNER_SOLID || k2 == CORNER_SOLID;
+        return true;
+    }
+
+    private boolean lavaCornerStep(Minecraft client, BuilderPathfinder.Cell next) {
+        BlockPos feet = client.player.blockPosition();
+        int dx = next.x() - feet.getX(), dz = next.z() - feet.getZ();
+        if (Math.abs(dx) != 1 || Math.abs(dz) != 1 || next.y() != feet.getY()) return false;
+        return cornerKind(client, new BlockPos(next.x(), feet.getY(), feet.getZ())) == CORNER_LAVA
+                || cornerKind(client, new BlockPos(feet.getX(), feet.getY(), next.z())) == CORNER_LAVA;
     }
 
     private boolean goal(Minecraft client, BuilderPathfinder.Cell at, BlockPos destination) {

@@ -59,6 +59,9 @@ public final class AutoBuilderController {
     private int layerY = Integer.MIN_VALUE, homeLayer = Integer.MIN_VALUE, setHomeUntil = -1;
     private boolean pendingSetHome;
     private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
+    private double groundY = Double.NaN;
+    private int lastFallTick = -100000;
+    private static final int FALL_BLOCKS = 3, FALL_MEMORY_TICKS = 20 * 30;
     private int progressBlocks = -1, progressSupports = -1, progressTick, stuckRecoveries, homeWaitUntil = -1, lastHomeTick = -100000;
 
     private static final class Pillar {
@@ -90,6 +93,7 @@ public final class AutoBuilderController {
         pillar = null; layerY = Integer.MIN_VALUE; homeLayer = Integer.MIN_VALUE; pendingSetHome = false; setHomeUntil = -1;
         progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
         homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
+        groundY = Double.NaN; lastFallTick = -100000;
     }
     public Schematic schematic() { return schematic; }
     public PlacementTransform transform() { return transform; }
@@ -303,6 +307,7 @@ public final class AutoBuilderController {
         if (!client.player.isAlive() || client.player.isRemoved()) { pauseWith("Player unavailable. Resume after respawning."); return; }
         if (client.player.isPassenger()) { pauseWith("Leave the vehicle, then Resume."); return; }
         if (client.player.isUsingItem()) { pauseWith("Finish using the held item, then Resume."); return; }
+        trackFall(client);
         if (lavaEscape(client)) return;
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
@@ -415,6 +420,7 @@ public final class AutoBuilderController {
         if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; }
         else if (movement==BuilderNavigator.Result.NO_PATH) {
             if (startPillar(client)) return;
+            if (strandedHome(client,"Fell down with nowhere to walk")) return;
             defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
         }
         else if (movement==BuilderNavigator.Result.STUCK) { noProgress+=30; }
@@ -422,6 +428,7 @@ public final class AutoBuilderController {
         reason="Walking to " + coordinates(current.pos) + " / " + navigator.routeLength() + " steps";
         if (noProgress>300) {
             if (startPillar(client)) return;
+            if (strandedHome(client,"Cannot get back to the build")) return;
             defer("Cannot reach a valid placement face or orientation at " + coordinates(current.pos) + ". Provide access, then Resume.");
         }
     }
@@ -480,10 +487,36 @@ public final class AutoBuilderController {
         if (!settings.autoHome) { pauseWith("No progress for 30 seconds. Move the player, then Resume."); return true; }
         if (stuckRecoveries>=3) { pauseWith("Still stuck after /home " + settings.homeSlot + " three times. Check the build, then Resume."); return true; }
         stuckRecoveries++;
+        beginHome(client,"Stuck");
+        return true;
+    }
+
+    private void beginHome(Minecraft client, String why) {
         sendHome(client);
         homeFrom=client.player.position(); homeWaitUntil=tick+HOME_WAIT_TICKS;
         pillar=null; current=null; prepared=null; pending=null; unconfirmed.clear();
-        reason="Stuck, using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
+        reason=why + ", using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
+    }
+
+    /** Remembers the last time the player dropped several blocks to a lower floor. */
+    private void trackFall(Minecraft client) {
+        var player=client.player;
+        if (!player.onGround()) return;
+        if (!Double.isNaN(groundY) && groundY-player.getY()>=FALL_BLOCKS) lastFallTick=tick;
+        groundY=player.getY();
+    }
+
+    /**
+     * The player fell below the build (or is well under the block it needs) and no route, pillar or
+     * placement face is available: go to /home right away instead of waiting 30 s or giving up.
+     */
+    private boolean strandedHome(Minecraft client, String why) {
+        if (!settings.autoHome || stuckRecoveries>=3 || current==null) return false;
+        boolean fell=tick-lastFallTick<FALL_MEMORY_TICKS;
+        boolean below=current.pos.getY()-client.player.getY()>=FALL_BLOCKS;
+        if (!fell && !below) return false;
+        stuckRecoveries++;
+        beginHome(client,why);
         return true;
     }
 
@@ -522,11 +555,13 @@ public final class AutoBuilderController {
 
     /**
      * Jump, and once the feet are a full block higher, place a block into the cell just left and land on it.
-     * Repeats until the target is within reach, so one pillar never rises past the layer being built.
+     * Repeats until the feet are level with the layer being built, and never climbs past it.
      */
     private boolean pillarTick(Minecraft client) {
         Pillar p=pillar; var player=client.player;
-        if (!settings.pillarUp || p.goal.pos.getY()-player.getY()<1.6) { pillar=null; navigator.reset(); return false; }
+        // Keep stacking until the player actually stands at the layer being built (feet level with it, resting on the
+        // block below). Only then does construction resume; a jump in mid-air never counts as having arrived.
+        if (!settings.pillarUp || (player.onGround() && player.getY()>=p.goal.pos.getY()-.05)) { pillar=null; navigator.reset(); return false; }
         if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
         navigator.hold(client,false);
         player.setXRot(90f);
