@@ -1,5 +1,6 @@
 package dev.donut.client.autobuild;
 
+import dev.donut.client.config.AutoBuilderSettings;
 import dev.donut.client.freecam.FreecamController;
 import dev.donut.client.mixin.BuilderClientLevelAccessor;
 import dev.donut.client.mixin.BuilderLocalPlayerAccessor;
@@ -43,6 +44,23 @@ public final class AutoBuilderController {
     private boolean scanned;
     private String lastFailure = "";
 
+    // ---- safety, climbing and recovery state
+    private static final int STUCK_TICKS = 20 * 30, HOME_WAIT_TICKS = 20 * 15, HOME_COOLDOWN_TICKS = 20 * 3;
+    private static final int MAX_FAILED_JUMPS = 6, PILLAR_TIMEOUT = 20 * 90;
+    private static final Item SCAFFOLD = Items.COBBLED_DEEPSLATE;
+    private AutoBuilderSettings settings = new AutoBuilderSettings();
+    private Pillar pillar;
+    private int layerY = Integer.MIN_VALUE, homeLayer = Integer.MIN_VALUE, setHomeUntil = -1;
+    private boolean pendingSetHome;
+    private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
+    private int progressBlocks = -1, progressSupports = -1, progressTick, stuckRecoveries, homeWaitUntil = -1, lastHomeTick = -100000;
+
+    private static final class Pillar {
+        final Target goal; final int started;
+        BlockPos base; boolean airborne, placedThisJump; int failed;
+        Pillar(Target goal, int started) { this.goal = goal; this.started = started; }
+    }
+
     private record Target(BlockPos pos, BlockState state, int index, boolean support) { }
     private record Prepared(Target target, PlacementPlanner.Plan plan, int readyTick) { }
     private static final class Pending {
@@ -57,6 +75,16 @@ public final class AutoBuilderController {
     }
     private AutoBuilderController() { }
     public static AutoBuilderController get() { return INSTANCE; }
+    /** Hooks the persisted preferences (climbing, lava guard, /home and /sethome) into the builder. */
+    public void configure(AutoBuilderSettings value) {
+        settings = value == null ? new AutoBuilderSettings() : value;
+        navigator.avoidLava = settings.lavaGuard;
+    }
+    private void resetSafety() {
+        pillar = null; layerY = Integer.MIN_VALUE; homeLayer = Integer.MIN_VALUE; pendingSetHome = false; setHomeUntil = -1;
+        progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
+        homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
+    }
     public Schematic schematic() { return schematic; }
     public PlacementTransform transform() { return transform; }
     public boolean previewVisible() { return previewVisible; }
@@ -102,21 +130,22 @@ public final class AutoBuilderController {
         cleanup.reset(client);
         correct.clear(); failures.clear(); deferred.clear(); scanIndex=0; scanned=false;
         work.clear(); work.addAll(targets); revalidateIndex=0; finalCheckIndex=0;
-        session=client.level; tick=0; noProgress=0; lastFailure=""; current=null; pending=null; prepared=null;
+        session=client.level; tick=0; noProgress=0; lastFailure=""; current=null; pending=null; prepared=null; resetSafety();
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; previewVisible=true;
         reason="Checking loaded blocks...";
     }
     public void pause() { pauseWith("Paused by you."); }
     private void pauseWith(String message) {
         if (status != Status.RUNNING && status != Status.PAUSED) { reason=message; return; }
-        status=Status.PAUSED; reason=message; prepared=null; cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
+        status=Status.PAUSED; reason=message; prepared=null; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
+        cleanup.reset(Minecraft.getInstance()); navigator.release(); restoreSlot();
     }
     public void resume() {
         if (status != Status.PAUSED) { start(); return; }
         Minecraft client=Minecraft.getInstance();
         if (!canRun(client)) return;
         if (session != client.level) { start(); return; }
-        failures.clear(); deferred.clear(); lastFailure=""; noProgress=0; current=null; prepared=null; navigator.reset();
+        failures.clear(); deferred.clear(); lastFailure=""; noProgress=0; current=null; prepared=null; navigator.reset(); resetSafety();
         work.clear(); for (Target target:targets) if (!correct.get(target.index)) work.add(target);
         originalSlot=client.player.getInventory().getSelectedSlot(); status=Status.RUNNING; reason="Resuming...";
     }
@@ -130,7 +159,7 @@ public final class AutoBuilderController {
     }
     public void cancel() {
         cleanup.reset(Minecraft.getInstance()); supportBlocks.clear(); navigator.reset(); restoreSlot(); current=null; prepared=null; pending=null; session=null;
-        failures.clear(); deferred.clear(); cooldown=0;
+        failures.clear(); deferred.clear(); cooldown=0; pillar=null; homeWaitUntil=-1; pendingSetHome=false;
         status=schematic == null ? Status.IDLE : Status.READY; reason="Build cancelled.";
     }
     public void disconnect() {
@@ -157,6 +186,9 @@ public final class AutoBuilderController {
         if (!client.player.isAlive() || client.player.isRemoved()) { pauseWith("Player unavailable. Resume after respawning."); return; }
         if (client.player.isPassenger()) { pauseWith("Leave the vehicle, then Resume."); return; }
         if (client.player.isUsingItem()) { pauseWith("Finish using the held item, then Resume."); return; }
+        if (lavaEscape(client)) return;
+        if (homeRecovery(client)) return;
+        if (watchProgress(client)) return;
         if (scanned) revalidate(client,256);
         if (pending != null) {
             navigator.hold(client,false);
@@ -202,6 +234,8 @@ public final class AutoBuilderController {
         }
         cleanup.reset(client);
         finalCheckIndex=0;
+        if (pendingSetHome && trySetHome(client)) return;
+        if (pillar != null && pillarTick(client)) return;
         if (current == null) current=chooseTarget(client);
         if (current == null) {
             pauseWith(lastFailure.isEmpty() ? "No placeable blocks remain. Check unloaded areas, supports and occupied positions." : lastFailure);
@@ -258,18 +292,182 @@ public final class AutoBuilderController {
         if (access!=null) { current=access; return; }
         BuilderNavigator.Result movement=navigator.moveTo(client,current.pos);
         if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; }
-        else if (movement==BuilderNavigator.Result.NO_PATH) { defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return; }
+        else if (movement==BuilderNavigator.Result.NO_PATH) {
+            if (startPillar(client)) return;
+            defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
+        }
         else if (movement==BuilderNavigator.Result.STUCK) { noProgress+=30; }
         else noProgress++;
         reason="Walking to " + coordinates(current.pos) + " / " + navigator.routeLength() + " steps";
-        if (noProgress>300) defer("Cannot reach a valid placement face or orientation at " + coordinates(current.pos) + ". Provide access, then Resume.");
+        if (noProgress>300) {
+            if (startPillar(client)) return;
+            defer("Cannot reach a valid placement face or orientation at " + coordinates(current.pos) + ". Provide access, then Resume.");
+        }
     }
+    // ---------------------------------------------------------------- layers and /sethome
+
+    private void noteLayer(int minimumY) {
+        if (layerY==Integer.MIN_VALUE) { layerY=minimumY; homeLayer=minimumY; return; }
+        layerY=minimumY;
+        if (minimumY>homeLayer) {
+            homeLayer=minimumY;
+            if (settings.autoSetHome) { pendingSetHome=true; setHomeUntil=tick+20*60; }
+            reason="Layer finished, moving up to Y=" + minimumY;
+        }
+    }
+
+    /** /sethome once the player stands on the new layer. Returns true while it is waiting to do so. */
+    private boolean trySetHome(Minecraft client) {
+        var player=client.player;
+        if (tick>setHomeUntil) { pendingSetHome=false; return false; }
+        if (!player.onGround() || player.getY()<layerY-0.05 || LavaGuard.near(client.level,player.blockPosition())) return false;
+        player.connection.sendCommand("sethome " + settings.homeSlot);
+        pendingSetHome=false; cooldown=10;
+        reason="Layer finished, home " + settings.homeSlot + " set at Y=" + layerY;
+        return true;
+    }
+
+    // ---------------------------------------------------------------- lava and getting stuck
+
+    private boolean lavaEscape(Minecraft client) {
+        if (!settings.lavaGuard || !client.player.isInLava()) return false;
+        String where=coordinates(client.player.blockPosition());
+        boolean sent=settings.autoHome && sendHome(client);
+        pauseWith("Entered lava at " + where + (sent ? "; sent /home " + settings.homeSlot : "") + ". Check the build, then Resume.");
+        return true;
+    }
+
+    private boolean sendHome(Minecraft client) {
+        if (tick-lastHomeTick<HOME_COOLDOWN_TICKS) return false;
+        client.player.connection.sendCommand("home " + settings.homeSlot);
+        lastHomeTick=tick;
+        return true;
+    }
+
+    /** No new block and no real movement for 30 s means the builder is stuck. */
+    private boolean watchProgress(Minecraft client) {
+        var pos=client.player.position();
+        int blocks=correct.cardinality(), supports=supportBlocks.size();
+        boolean built=blocks!=progressBlocks || supports!=progressSupports;
+        if (progressAnchor==null || built || pos.distanceToSqr(progressAnchor)>4.0) {
+            if (built) stuckRecoveries=0;
+            progressAnchor=pos; progressBlocks=blocks; progressSupports=supports; progressTick=tick;
+            return false;
+        }
+        if (tick-progressTick<STUCK_TICKS) return false;
+        progressTick=tick;
+        if (!settings.autoHome) { pauseWith("No progress for 30 seconds. Move the player, then Resume."); return true; }
+        if (stuckRecoveries>=3) { pauseWith("Still stuck after /home " + settings.homeSlot + " three times. Check the build, then Resume."); return true; }
+        stuckRecoveries++;
+        sendHome(client);
+        homeFrom=client.player.position(); homeWaitUntil=tick+HOME_WAIT_TICKS;
+        pillar=null; current=null; prepared=null; pending=null; unconfirmed.clear();
+        reason="Stuck, using /home " + settings.homeSlot + " (" + stuckRecoveries + "/3)";
+        return true;
+    }
+
+    /** Stands still while /home warms up, then replans from the new position. */
+    private boolean homeRecovery(Minecraft client) {
+        if (homeWaitUntil<0) return false;
+        navigator.hold(client,false);
+        if (client.player.position().distanceToSqr(homeFrom)>16) {
+            homeWaitUntil=-1; navigator.reset();
+            failures.clear(); deferred.clear(); work.clear();
+            for (Target target:targets) if (!correct.get(target.index)) work.add(target);
+            scanIndex=0; scanned=false; revalidateIndex=0; finalCheckIndex=0; noProgress=0; cooldown=40;
+            progressAnchor=null; progressTick=tick;
+            reason="Back at home " + settings.homeSlot + ", checking the build and continuing...";
+            return true;
+        }
+        if (tick>=homeWaitUntil) {
+            homeWaitUntil=-1;
+            pauseWith("/home " + settings.homeSlot + " did not move the player. Set that home first, then Resume.");
+            return true;
+        }
+        reason="Waiting for /home " + settings.homeSlot + "...";
+        return true;
+    }
+
+    // ---------------------------------------------------------------- climbing with temporary blocks
+
+    /** Called when a target is too high to reach and no walking route exists. */
+    private boolean startPillar(Minecraft client) {
+        if (!settings.pillarUp || current==null || current.support) return false;
+        if (current.pos.getY()-client.player.getY()<1.6 || findSlot(client,SCAFFOLD)<0) return false;
+        pillar=new Pillar(current,tick); current=null; navigator.reset(); noProgress=0;
+        reason="Climbing to " + coordinates(pillar.goal.pos);
+        return true;
+    }
+
+    /**
+     * Jump, and once the feet are a full block higher, place a block into the cell just left and land on it.
+     * Repeats until the target is within reach, so one pillar never rises past the layer being built.
+     */
+    private boolean pillarTick(Minecraft client) {
+        Pillar p=pillar; var player=client.player;
+        if (!settings.pillarUp || p.goal.pos.getY()-player.getY()<1.6) { pillar=null; navigator.reset(); return false; }
+        if (tick-p.started>PILLAR_TIMEOUT) { giveUpClimbing(p,"Climbing took too long"); return true; }
+        navigator.hold(client,false);
+        player.setXRot(90f);
+        if (player.onGround()) {
+            if (p.airborne) { // just landed
+                p.airborne=false;
+                if (!p.placedThisJump && ++p.failed>=MAX_FAILED_JUMPS) { giveUpClimbing(p,"Could not place a block while climbing"); return true; }
+                p.placedThisJump=false;
+            }
+            BlockPos feet=player.blockPosition();
+            if (settings.lavaGuard && LavaGuard.near(client.level,feet)) { giveUpClimbing(p,"Lava next to the climbing spot"); return true; }
+            if (!client.level.noCollision(player,player.getBoundingBox().expandTowards(0,1.3,0))
+                    || !client.level.getBlockState(feet).canBeReplaced()) { giveUpClimbing(p,"No room to climb"); return true; }
+            int slot=findSlot(client,SCAFFOLD);
+            if (slot<0) { pillar=null; pauseWith("Missing " + SCAFFOLD.getName().getString() + " for climbing. Add materials, then Resume."); return true; }
+            if (slot>=9) {
+                int selected=player.getInventory().getSelectedSlot();
+                client.gameMode.handleInventoryMouseClick(player.inventoryMenu.containerId,slot,selected,ClickType.SWAP,player);
+                cooldown=2; reason="Moving material into the hotbar..."; return true;
+            }
+            player.getInventory().setSelectedSlot(slot);
+            // The look-down has to be sent before the jump so the click can follow without another rotation.
+            if (Math.abs(((BuilderLocalPlayerAccessor)player).donut$lastSentPitch()-90f)<.5f) {
+                p.base=feet.immutable(); p.airborne=true;
+                navigator.jump(client);
+            }
+            reason="Climbing to " + coordinates(p.goal.pos);
+            return true;
+        }
+        p.airborne=true;
+        if (p.base==null || p.placedThisJump || player.getY()<p.base.getY()+1.0) return true;
+        BlockState scaffold=Blocks.COBBLED_DEEPSLATE.defaultBlockState();
+        if (!client.level.getBlockState(p.base).canBeReplaced()) return true;
+        var plan=PlacementPlanner.plan(client,p.base,scaffold,player.getMainHandItem());
+        if (plan==null) return true;
+        current=new Target(p.base,scaffold,-1,true);
+        plan=pillarAim(client,plan);
+        prepared=new Prepared(current,plan,tick+1);
+        p.placedThisJump=true;
+        reason="Climbing: placing a block at " + coordinates(p.base);
+        return true;
+    }
+
+    private void giveUpClimbing(Pillar p,String message) {
+        pillar=null; current=p.goal; navigator.reset();
+        defer(message + " at " + coordinates(p.goal.pos) + ". Provide a path, then Resume.");
+    }
+
+    /** A support under the feet needs no particular look point, so keep the yaw and keep looking straight down. */
+    private PlacementPlanner.Plan pillarAim(Minecraft client,PlacementPlanner.Plan plan) {
+        if (pillar==null || current==null || !current.support || plan.hit().getDirection()!=Direction.UP) return plan;
+        return new PlacementPlanner.Plan(plan.hit(),plan.prediction(),client.player.getYRot(),90f,false);
+    }
+
     private Target chooseTarget(Minecraft client) {
         Target best=null; double bestScore=Double.POSITIVE_INFINITY;
         if (work.isEmpty()) return null;
         int minimumY=work.first().pos.getY(), examined=0;
+        noteLayer(minimumY);
+        // A layer is finished completely before any block of the next one is chosen.
         for (Target target:work) {
-            if (++examined>256 || target.pos.getY()>minimumY+1) break;
+            if (++examined>256 || target.pos.getY()>minimumY) break;
             double score=client.player.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(target.pos))
                     + (target.pos.getY()-minimumY)*64 + (MaterialTracker.isSecondary(target.state)?512:0);
             if (score<bestScore) { bestScore=score; best=target; }
@@ -291,7 +489,12 @@ public final class AutoBuilderController {
         if (!action.target.equals(current)) return;
         // Recompute after walking/input has settled; entities and the world may have moved.
         var plan=PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
-        if (plan==null) { navigator.rejectCurrent(client); return; }
+        if (plan==null) {
+            // Climbing: the jump window passed, go back to jumping instead of replanning a walk.
+            if (pillar!=null && current.support) { current=null; return; }
+            navigator.rejectCurrent(client); return;
+        }
+        plan=pillarAim(client,plan);
         boolean sneak=shouldSneak(client,current,plan);
         navigator.hold(client,sneak);
         aim(client,plan);
@@ -390,7 +593,8 @@ public final class AutoBuilderController {
             return target.pos.relative(target.state.getValue(BedBlock.FACING));
         return null;
     }
-    private static boolean shouldSneak(Minecraft client,Target target,PlacementPlanner.Plan plan) {
+    private boolean shouldSneak(Minecraft client,Target target,PlacementPlanner.Plan plan) {
+        if (pillar!=null && target.support) return false; // in mid-air, and the support is a plain block
         // Sneaking prevents opening a support container, but also prevents slab/stack-item merging.
         return !plan.configure() && client.level.getBlockState(target.pos).getBlock()!=target.state.getBlock();
     }

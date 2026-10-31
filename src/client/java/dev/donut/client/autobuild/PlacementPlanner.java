@@ -18,6 +18,13 @@ public final class PlacementPlanner {
     public record Plan(BlockHitResult hit, BlockState prediction, float yaw, float pitch, boolean configure) { }
     private static final Set<String> DERIVED = Set.of("powered", "power", "lit", "locked", "in_wall", "snowy",
             "distance", "north", "east", "south", "west", "up", "down");
+    /**
+     * Facing of observers, pistons, furnaces, stairs, hoppers and so on comes from the player's rotation, not from the
+     * clicked point. A vanilla server accepts any click that is in reach, so a rotation chosen only to get the right
+     * facing is sent first (by vanilla's own per-tick packet) and the click follows. Yaw 0 looks south, 90 west,
+     * 180 north, -90 east; pitch 90 looks down and -90 up.
+     */
+    private static final float[][] ORIENTATIONS = {{0, 0}, {90, 0}, {180, 0}, {-90, 0}, {0, 90}, {0, -90}};
     private PlacementPlanner() { }
 
     public static boolean compatible(BlockState desired, BlockState predicted) {
@@ -106,10 +113,17 @@ public final class PlacementPlanner {
                     return new Plan(hit,predicted,yaw,pitch,true);
                 }
                 BlockItem item = (BlockItem)stack.getItem();
-                BlockPlaceContext context = item.updatePlacementContext(new BlockPlaceContext(client.player,InteractionHand.MAIN_HAND,stack,hit));
-                if (context == null || !context.getClickedPos().equals(target) || !context.canPlace()) continue;
-                BlockState predicted = ((BlockItemAccessor)item).donut$getPlacementState(context);
-                if (compatible(desired,predicted)) return new Plan(hit,predicted,yaw,pitch,false);
+                // First the natural look at the clicked point, then each fixed orientation until the facing matches.
+                for (int i = -1; i < ORIENTATIONS.length; i++) {
+                    float tryYaw = i < 0 ? yaw : ORIENTATIONS[i][0];
+                    float tryPitch = i < 0 ? pitch : ORIENTATIONS[i][1];
+                    client.player.setYRot(tryYaw); client.player.setXRot(tryPitch);
+                    BlockPlaceContext context = item.updatePlacementContext(new BlockPlaceContext(client.player,InteractionHand.MAIN_HAND,stack,hit));
+                    // These do not depend on rotation, so no other angle can fix them for this click point.
+                    if (context == null || !context.getClickedPos().equals(target) || !context.canPlace()) break;
+                    BlockState predicted = ((BlockItemAccessor)item).donut$getPlacementState(context);
+                    if (compatible(desired,predicted)) return new Plan(hit,predicted,tryYaw,tryPitch,false);
+                }
             }
         } finally { client.player.setYRot(oldYaw); client.player.setXRot(oldPitch); }
         return null;
