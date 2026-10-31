@@ -32,7 +32,9 @@ jobs:
       - name: Run tests and build
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon clean test build
+          # --refresh-dependencies ignores Gradle's cached "not found" results for a failed lookup.
+          # Remove it again once the build is green if you want faster runs.
+          ./gradlew --no-daemon --refresh-dependencies clean test build
 
       - name: Upload mod jar
         if: success()
