@@ -460,17 +460,29 @@ public final class AutoBuilderController {
         return new PlacementPlanner.Plan(plan.hit(),plan.prediction(),client.player.getYRot(),90f,false);
     }
 
+    /** Y of the lowest layer that still has a block the server has not confirmed, deferred blocks included. */
+    private int lowestIncompleteY() {
+        for (Target target:targets) if (!correct.get(target.index)) return target.pos.getY();
+        return Integer.MIN_VALUE;
+    }
     private Target chooseTarget(Minecraft client) {
         Target best=null; double bestScore=Double.POSITIVE_INFINITY;
         if (work.isEmpty()) return null;
-        int minimumY=work.first().pos.getY(), examined=0;
-        noteLayer(minimumY);
-        // A layer is finished completely before any block of the next one is chosen.
+        // The layer is decided by what is still unbuilt, not by what is currently placeable, so a block that was
+        // put aside can never let the builder climb to the next layer.
+        int layer=lowestIncompleteY(), examined=0;
+        if (layer==Integer.MIN_VALUE) return null;
+        noteLayer(layer);
         for (Target target:work) {
-            if (++examined>256 || target.pos.getY()>minimumY) break;
+            if (target.pos.getY()<layer) continue;
+            if (target.pos.getY()>layer || ++examined>256) break;
             double score=client.player.position().distanceToSqr(net.minecraft.world.phys.Vec3.atCenterOf(target.pos))
-                    + (target.pos.getY()-minimumY)*64 + (MaterialTracker.isSecondary(target.state)?512:0);
+                    + (MaterialTracker.isSecondary(target.state)?512:0);
             if (score<bestScore) { bestScore=score; best=target; }
+        }
+        if (best==null) {
+            lastFailure="Layer Y=" + layer + " cannot be finished yet. " + (lastFailure.isEmpty()
+                    ? "Check unloaded areas, supports and occupied positions." : lastFailure);
         }
         return best;
     }
