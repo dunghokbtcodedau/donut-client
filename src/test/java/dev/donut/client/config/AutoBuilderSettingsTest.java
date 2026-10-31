@@ -23,7 +23,7 @@ class AutoBuilderSettingsTest {
         assertTrue(loaded.autoBuilder.favorite);
         assertEquals(.53, loaded.autoBuilder.previewOpacity);
         var saved = JsonParser.parseString(Files.readString(path)).getAsJsonObject().getAsJsonObject("autoBuilder");
-        assertEquals(10, saved.size(), "Only preferences may persist, never activation or position");
+        assertEquals(11, saved.size(), "Only preferences may persist, never activation or position");
         assertFalse(saved.has("enabled"));
         assertFalse(saved.has("origin"));
     }
@@ -33,6 +33,7 @@ class AutoBuilderSettingsTest {
         assertTrue(settings.pillarUp && settings.lavaGuard && settings.autoHome && settings.autoSetHome);
         assertEquals(3, settings.homeSlot);
         assertTrue(settings.autoRestock);
+        assertFalse(settings.alwaysAbove);
         assertEquals(2, settings.lavaHomeSlot);
         assertEquals(1, settings.waterHomeSlot);
         Path path = directory.resolve("donut.json");
