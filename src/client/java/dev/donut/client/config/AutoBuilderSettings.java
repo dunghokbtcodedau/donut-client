@@ -11,8 +11,13 @@ public final class AutoBuilderSettings {
     public boolean lavaGuard = true;
     /** Run /home when the builder makes no progress for 30 seconds. */
     public boolean autoHome = true;
-    /** Run /sethome after each finished layer, once the player stands on the next one. */
+    /**
+     * At the end of each layer: /sethome on top of it (one block above), break the temporary supports, then /home
+     * back to that spot.
+     */
     public boolean autoSetHome = true;
+    /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
+    public boolean alwaysAbove = false;
     /** Home slot used by /home and /sethome (the build site). */
     public int homeSlot = 3;
     /**
