@@ -7,6 +7,8 @@ public final class AutoBuilderSettings {
 
     /** Climb to blocks that are too high by jumping and placing a temporary block under the feet. */
     public boolean pillarUp = true;
+    /** Allow parkour: sprint-jump across 1-2 block gaps and hop up/down single blocks while walking to a build spot. */
+    public boolean parkour = true;
     /** Leave lava alone: avoid walking next to it and use /home when the player ends up inside it. */
     public boolean lavaGuard = true;
     /** Run /home when the builder makes no progress for 30 seconds. */
