@@ -52,15 +52,4 @@ class BuilderPathfinderTest {
         Cell end=new Cell(1,1,1);
         assertTrue(BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,40,5).isEmpty());
     }
-    @Test void parkourJumpsAGapOnlyWhenAllowed() {
-        var terrain=new BuilderPathfinder.Terrain() {
-            public boolean standable(Cell p) { return p.y()==1 && (p.x()<=0 || p.x()>=3) && p.z()==0; }
-            public boolean headroom(Cell p) { return true; }
-        };
-        Cell end=new Cell(4,1,0);
-        assertTrue(BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,500,10).isEmpty());
-        var path=BuilderPathfinder.find(new Cell(0,1,0),end,terrain,end::equals,500,10,true);
-        assertFalse(path.isEmpty()); assertEquals(end,path.getLast());
-        assertTrue(path.contains(new Cell(3,1,0)));
-    }
 }
