@@ -63,16 +63,17 @@ public final class AutoBuilderController {
     private net.minecraft.world.phys.Vec3 progressAnchor, homeFrom;
     private final BucketRestock restock = new BucketRestock();
     // End of a layer: walk to a spot above it, /sethome, break the temporary supports, /home back.
-    private enum Wrap { NONE, WALK, SETHOME, CLEAN, HOME }
+    private enum Wrap { NONE, WALK, SETHOME, CLEAN }
     private Wrap wrap = Wrap.NONE;
     private int wrapLayer, wrapStart, wrapUntil, wrapStuck;
     private BlockPos wrapCell;
-    private int homeSetLayer = Integer.MIN_VALUE;
+    private int homeSetLayer = Integer.MIN_VALUE, noRouteTicks;
     private boolean wrapHomeSet, wrapSent, wrapHadSupports, justFell, relaxAbove;
     private net.minecraft.world.phys.Vec3 wrapFrom;
     private int restockFails;
     private double groundY = Double.NaN;
     private int lastFallTick = -100000;
+    private static final int STUCK_HOME_TICKS = 20;
     private static final int FALL_BLOCKS = 3, FALL_MEMORY_TICKS = 20 * 30;
     private int progressBlocks = -1, progressSupports = -1, progressTick, stuckRecoveries, homeWaitUntil = -1, lastHomeTick = -100000;
 
@@ -106,7 +107,7 @@ public final class AutoBuilderController {
         progressAnchor = null; progressBlocks = -1; progressSupports = -1; progressTick = tick; stuckRecoveries = 0;
         homeWaitUntil = -1; homeFrom = null; navigator.avoidLava = settings.lavaGuard;
         groundY = Double.NaN; lastFallTick = -100000; justFell = false;
-        wrap = Wrap.NONE; wrapCell = null; relaxAbove = false; homeSetLayer = Integer.MIN_VALUE;
+        wrap = Wrap.NONE; wrapCell = null; relaxAbove = false; homeSetLayer = Integer.MIN_VALUE; noRouteTicks = 0;
         LavaGuard.setPlannedLayer(Integer.MIN_VALUE);
     }
     public Schematic schematic() { return schematic; }
@@ -382,7 +383,7 @@ public final class AutoBuilderController {
         trackFall(client);
         if (lavaEscape(client)) return;
         if (restock.active()) { justFell=false; restockTick(client); return; }
-        if (justFell) { justFell=false; if (wrap==Wrap.NONE && homeAfterFall(client)) return; }
+        if (justFell && wrap==Wrap.NONE) { justFell=false; if (homeAfterFall(client)) return; }
         if (homeRecovery(client)) return;
         if (watchProgress(client)) return;
         if (scanned) revalidate(client,256);
@@ -502,17 +503,24 @@ public final class AutoBuilderController {
             if (access!=null) { current=access; return; }
         }
         BuilderNavigator.Result movement=navigator.moveTo(client,current.pos);
-        if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; }
+        if (movement==BuilderNavigator.Result.ARRIVED) { navigator.rejectCurrent(client); noProgress++; noRouteTicks=0; }
         else if (movement==BuilderNavigator.Result.NO_PATH) {
             if (startPillar(client)) return;
             if (settings.alwaysAbove && !relaxAbove && client.player.getY()<layerY+1-.05) {
                 relaxAbove=true; navigator.minStandY=Integer.MIN_VALUE; navigator.replan(); return; // cannot climb: place from below
             }
-            if (strandedHome(client,"No route to walk")) return;
+            // Only a route that stays missing for over a second counts as stuck.
+            if (++noRouteTicks<STUCK_HOME_TICKS) { reason="Looking for a route to " + coordinates(current.pos); return; }
+            noRouteTicks=0;
+            if (strandedHome(client,"No route for over a second")) return;
             defer("No walking route to " + coordinates(current.pos) + ". Provide a path or stairs, then Resume."); return;
         }
-        else if (movement==BuilderNavigator.Result.STUCK) { noProgress+=30; }
-        else noProgress++;
+        else if (movement==BuilderNavigator.Result.STUCK) {
+            // The navigator reports STUCK only after the player has not moved for over a second.
+            noProgress+=30; noRouteTicks=0;
+            if (strandedHome(client,"Stuck for over a second")) return;
+        }
+        else { noProgress++; noRouteTicks=0; }
         reason="Walking to " + coordinates(current.pos) + " / " + navigator.routeLength() + " steps";
         if (noProgress>300) {
             if (startPillar(client)) return;
@@ -541,8 +549,8 @@ public final class AutoBuilderController {
     }
 
     /**
-     * End of a layer: stand one block above it and /sethome, break the temporary supports, then /home back to that
-     * spot (the supports may have been what the player stood on). Returns true while it is busy.
+     * End of a layer: make sure /sethome was done one block above it, then break the temporary supports. There is no
+     * /home here; falling afterwards (or getting stuck) is what sends the player home. Returns true while busy.
      */
     private boolean wrapTick(Minecraft client) {
         var player=client.player;
@@ -573,25 +581,13 @@ public final class AutoBuilderController {
                 return true;
             }
             case CLEAN -> {
-                if (supportBlocks.isEmpty()) { wrap=Wrap.HOME; wrapSent=false; return true; }
+                if (supportBlocks.isEmpty()) return endWrap(client,"Layer Y=" + wrapLayer + " finished");
                 wrapHadSupports=true;
                 SupportCleanup.Result result=cleanup.tick(client,navigator,supportBlocks,indices.keySet());
                 reason="Layer Y=" + wrapLayer + " done: " + cleanup.reason();
-                if (result==SupportCleanup.Result.DONE) { wrap=Wrap.HOME; wrapSent=false; }
-                else if (result==SupportCleanup.Result.BLOCKED) { cleanup.reset(client); wrap=Wrap.HOME; wrapSent=false; }
-                return true;
-            }
-            case HOME -> {
-                navigator.release();
-                // Only come back to the new home when it was set this layer and something was actually broken.
-                if (!wrapSent) {
-                    if (!wrapHomeSet || !wrapHadSupports) return endWrap(client,"Layer Y=" + wrapLayer + " finished");
-                    player.connection.sendCommand("home " + settings.homeSlot);
-                    wrapFrom=player.position(); wrapSent=true; wrapUntil=tick+60;
-                    reason="Supports removed, /home " + settings.homeSlot;
-                } else if (player.position().distanceToSqr(wrapFrom)>2.25 || tick>=wrapUntil) {
-                    return endWrap(client,"Back above layer Y=" + wrapLayer + ", continuing");
-                }
+                // No /home here: it only happens when the player really falls or gets stuck afterwards.
+                if (result==SupportCleanup.Result.DONE) return endWrap(client,"Layer Y=" + wrapLayer + " finished, supports removed");
+                if (result==SupportCleanup.Result.BLOCKED) { cleanup.reset(client); return endWrap(client,"Layer Y=" + wrapLayer + " finished"); }
                 return true;
             }
             default -> { return false; }
@@ -617,7 +613,7 @@ public final class AutoBuilderController {
     }
 
     private boolean endWrap(Minecraft client, String message) {
-        wrap=Wrap.NONE; wrapCell=null; justFell=false;
+        wrap=Wrap.NONE; wrapCell=null;
         cleanup.reset(client);
         resumeAfterTeleport(message);
         return true;

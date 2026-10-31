@@ -121,7 +121,7 @@ public final class BuilderNavigator {
             if (client.player.onGround()) { steering.jump = true; steering.sneak = false; }
         }
         steering.tick();
-        if (stalled > 30) { blocked.add(next); rejectCurrent(client); return Result.STUCK; }
+        if (stalled > 20) { blocked.add(next); rejectCurrent(client); return Result.STUCK; } // over a second without moving
         return Result.MOVING;
     }
 
