@@ -63,6 +63,7 @@ public final class DonutClient implements ClientModInitializer {
         AutoBuilderController autoBuilder = AutoBuilderController.get();
         autoBuilder.configure(config.autoBuilder);
         ClientTickEvents.START_CLIENT_TICK.register(autoBuilder::tick);
+        net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents.GAME.register((message, overlay) -> { if (!overlay) autoBuilder.onServerMessage(message.getString()); });
         HighlightRenderer renderer = new HighlightRenderer(config, scanner, chunkScanner);
         renderer.register();
 
