@@ -61,6 +61,7 @@ public final class DonutClient implements ClientModInitializer {
         AutoMineController autoMine = new AutoMineController(config);
         ClientTickEvents.END_CLIENT_TICK.register(autoMine::tick);
         AutoBuilderController autoBuilder = AutoBuilderController.get();
+        autoBuilder.configure(config.autoBuilder);
         ClientTickEvents.START_CLIENT_TICK.register(autoBuilder::tick);
         HighlightRenderer renderer = new HighlightRenderer(config, scanner, chunkScanner);
         renderer.register();
