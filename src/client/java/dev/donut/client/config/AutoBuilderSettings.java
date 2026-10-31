@@ -16,6 +16,11 @@ public final class AutoBuilderSettings {
      * /home is used only when the player falls or is stuck.
      */
     public boolean autoSetHome = true;
+    /**
+     * Turn to face the block (and look down while climbing) before placing, then send the placement packet. Off: the
+     * player is not turned at all and the placement packet is sent from wherever it already faces.
+     */
+    public boolean autoRotate = true;
     /** Always stand one block above the layer being placed, climbing there first whenever the player is lower. */
     public boolean alwaysAbove = false;
     /** Home slot used by /home and /sethome (the build site). */
