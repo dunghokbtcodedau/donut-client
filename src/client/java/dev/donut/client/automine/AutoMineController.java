@@ -27,9 +27,8 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Two modes. Ore mode lets Baritone mine the selected ores. Area mode digs the rectangle between point 1 and
- * point 2: it first walks to the block that was left half-dug (or, on a fresh start, to the nearest corner) and
- * only then lets Baritone clear the whole area.
+ * Two modes. Ore mode lets Baritone mine the selected ores. Area mode digs the box between point 1 and point 2
+ * one layer at a time from the top, row by row in a snake pattern that starts at the corner nearest to the player.
  *
  * Ore mode: lets Baritone mine the selected ores and watches every block it breaks. A break counts as accepted only once the
  * block stays gone for a few ticks. If the server puts it back, Baritone is paused and this controller keeps
@@ -114,6 +113,9 @@ public final class AutoMineController {
         gotoIssued = false;
         gotoAttempts = 0;
         digRestarts = 0;
+        layerY = NO_LAYER;
+        rowActive = false;
+        rowK = 0;
         s.status = "Starting Baritone";
     }
 
@@ -181,88 +183,148 @@ public final class AutoMineController {
     }
 
     // ---------------------------------------------------------------- area mode
+    //
+    // The area is dug one layer at a time, from the top layer down. Inside a layer the rows are dug in a snake
+    // pattern that starts at the corner nearest to the player:
+    //
+    //   +-----------+        row 1: corner -> far side
+    //               |        row 2: back
+    //   +-----------+        row 3: forward again, and so on
+    //   |
+    //   +-----------+
+    //
+    // Every row is one Baritone clearArea call on a strip one block wide and one block high. What is still left
+    // is always read back from the world, so stopping and starting again simply continues where the world is.
+
+    private static final int NO_LAYER = Integer.MIN_VALUE;
+    private int layerY = NO_LAYER, rowK, rowCount, rowV;
+    private boolean alongX, startMinU, startMinV, rowActive;
+    private BlockPos rowA, rowB;
+
+    private int uMin(AutoMineSettings s) { return alongX ? s.minX() : s.minZ(); }
+    private int uMax(AutoMineSettings s) { return alongX ? s.maxX() : s.maxZ(); }
+    private int vMin(AutoMineSettings s) { return alongX ? s.minZ() : s.minX(); }
+    private int vMax(AutoMineSettings s) { return alongX ? s.maxZ() : s.maxX(); }
+    private BlockPos cellAt(int u, int v, int y) { return alongX ? new BlockPos(u, y, v) : new BlockPos(v, y, u); }
 
     private void tickArea(Minecraft mc, LocalPlayer player, ClientLevel level) {
         AutoMineSettings s = config.autoMine;
-        BlockPos a = new BlockPos(s.p1x, s.p1y, s.p1z);
-        BlockPos b = new BlockPos(s.p2x, s.p2y, s.p2z);
+        if (!rowActive && !beginNextRow(mc, player, level, s)) return;
         if (phase == Phase.GOTO) {
             if (!gotoIssued) {
-                gotoTarget = chooseStart(player, level, s);
-                if (gotoTarget == null) { startDig(s, a, b); return; }
-                if (isNear(player, gotoTarget)) { startDig(s, a, b); return; }
-                BaritoneLink.goTo(gotoTarget, GOTO_RANGE);
+                if (isNear(player, rowA)) { startRow(s); return; }
+                BaritoneLink.goTo(rowA, GOTO_RANGE);
                 gotoIssued = true;
                 graceUntil = tick + 10;
                 phaseStart = tick;
-                s.status = (lastDigStillValid(level, s) ? "Going to the half-dug block " : "Going to the corner ") + gotoTarget.toShortString();
-            } else if (isNear(player, gotoTarget)) {
-                startDig(s, a, b);
+                s.status = "Going to the start of row " + (rowK + 1) + "/" + rowCount + " (Y=" + layerY + ")";
+            } else if (isNear(player, rowA)) {
+                startRow(s);
             } else if (tick - phaseStart > GOTO_TIMEOUT) {
-                startDig(s, a, b); // Baritone will walk there itself while digging
+                startRow(s); // Baritone will walk there itself while digging
             } else if (tick > graceUntil && !BaritoneLink.goToActive()) {
-                if (++gotoAttempts >= 3) startDig(s, a, b);
+                if (++gotoAttempts >= 3) startRow(s);
                 else gotoIssued = false; // path ended early, plan again
             }
             return;
         }
         if (resume) {
             resume = false;
-            BaritoneLink.clearArea(a, b);
+            BaritoneLink.clearArea(rowA, rowB);
             graceUntil = tick + 20;
-            s.status = "Digging area";
+            s.status = rowStatus(s);
         } else if (tick > graceUntil && !BaritoneLink.builderActive()) {
-            int left = remaining(level, s);
-            if (left == 0) {
-                stop("Finished: area cleared");
-                say(mc, "AutoMine finished: the area is clear.");
-                return;
-            }
+            int left = rowRemaining(level, s, layerY, rowV);
+            if (left == 0) { rowActive = false; return; } // row done: the next tick picks the next row
             if (++digRestarts > 5) {
-                stop("Baritone cannot reach the last " + left + " blocks");
-                say(mc, "AutoMine stopped: " + left + " blocks could not be dug.");
+                stop("Baritone cannot reach the last " + left + " blocks of row " + (rowK + 1));
+                say(mc, "AutoMine stopped: " + left + " blocks in row " + (rowK + 1) + " of layer Y=" + layerY + " could not be dug.");
                 return;
             }
-            BaritoneLink.clearArea(a, b);
+            BaritoneLink.clearArea(rowA, rowB);
             graceUntil = tick + 20;
-            s.status = "Digging area";
+            s.status = rowStatus(s);
         }
         observe(mc, level);
     }
 
-    private void startDig(AutoMineSettings s, BlockPos a, BlockPos b) {
+    private String rowStatus(AutoMineSettings s) {
+        int layers = s.maxY() - s.minY() + 1, done = s.maxY() - layerY + 1;
+        return "Layer " + done + "/" + layers + " (Y=" + layerY + "), row " + (rowK + 1) + "/" + rowCount;
+    }
+
+    /** Picks the next row (finishing the layer, then moving one layer down). False once the work is over. */
+    private boolean beginNextRow(Minecraft mc, LocalPlayer player, ClientLevel level, AutoMineSettings s) {
+        if (layerY != NO_LAYER) {
+            int k = nextRow(level, s);
+            if (k >= 0) { setRow(s, k); return true; }
+        }
+        int y = findLayer(level, s, layerY == NO_LAYER ? s.maxY() : layerY);
+        if (y == NO_LAYER && layerY != NO_LAYER) y = findLayer(level, s, s.maxY()); // full check before finishing
+        if (y == NO_LAYER) {
+            stop("Finished: area cleared");
+            say(mc, "AutoMine finished: the area is clear.");
+            return false;
+        }
+        if (y != layerY) { layerY = y; chooseCorner(player, s); rowK = 0; }
+        int k = nextRow(level, s);
+        if (k < 0) { // the layer reported blocks but no row has any: nothing sensible left to do
+            stop("Finished: area cleared");
+            say(mc, "AutoMine finished: the area is clear.");
+            return false;
+        }
+        setRow(s, k);
+        return true;
+    }
+
+    /** The corner of the area nearest to the player: each axis starts on the side the player is closer to. */
+    private void chooseCorner(LocalPlayer player, AutoMineSettings s) {
+        alongX = (s.maxX() - s.minX()) >= (s.maxZ() - s.minZ()); // rows run along the longer side
+        boolean nearMinX = player.getX() <= (s.minX() + s.maxX() + 1) / 2.0;
+        boolean nearMinZ = player.getZ() <= (s.minZ() + s.maxZ() + 1) / 2.0;
+        startMinU = alongX ? nearMinX : nearMinZ;
+        startMinV = alongX ? nearMinZ : nearMinX;
+        rowCount = vMax(s) - vMin(s) + 1;
+    }
+
+    private void setRow(AutoMineSettings s, int k) {
+        rowK = k;
+        rowV = startMinV ? vMin(s) + k : vMax(s) - k;
+        boolean forward = k % 2 == 0; // even rows go away from the start side, odd rows come back
+        boolean fromMin = forward ? startMinU : !startMinU;
+        rowA = cellAt(fromMin ? uMin(s) : uMax(s), rowV, layerY);
+        rowB = cellAt(fromMin ? uMax(s) : uMin(s), rowV, layerY);
+        rowActive = true;
+        phase = Phase.GOTO;
+        gotoIssued = false;
+        gotoAttempts = 0;
+        digRestarts = 0;
+    }
+
+    private void startRow(AutoMineSettings s) {
         try { BaritoneLink.cancel(); } catch (RuntimeException | LinkageError ignored) { }
         phase = Phase.DIG;
-        gotoTarget = null;
         gotoIssued = false;
-        BaritoneLink.clearArea(a, b);
+        resume = false;
+        BaritoneLink.clearArea(rowA, rowB);
         graceUntil = tick + 20;
-        s.status = "Digging area";
+        s.status = rowStatus(s);
     }
 
-    /** The block that was being dug when AutoMine stopped, otherwise the nearest corner that still has blocks. */
-    private BlockPos chooseStart(LocalPlayer player, ClientLevel level, AutoMineSettings s) {
-        if (lastDigStillValid(level, s)) return lastDig;
-        BlockPos best = null;
-        double bestDist = Double.MAX_VALUE;
-        int[] xs = {s.minX(), s.maxX()};
-        int[] zs = {s.minZ(), s.maxZ()};
-        for (int x : xs) {
-            for (int z : zs) {
-                for (int y = s.maxY(); y >= s.minY(); y--) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    if (!diggable(level, pos, level.getBlockState(pos))) continue;
-                    double d = player.position().distanceToSqr(Vec3.atCenterOf(pos));
-                    if (d < bestDist) { bestDist = d; best = pos; }
-                    break; // highest solid block of this corner column
-                }
-            }
+    /** First row, starting from the current one and wrapping round, that still has blocks. -1 when the layer is clear. */
+    private int nextRow(ClientLevel level, AutoMineSettings s) {
+        for (int i = 0; i < rowCount; i++) {
+            int k = (rowK + i) % rowCount;
+            int v = startMinV ? vMin(s) + k : vMax(s) - k;
+            if (rowRemaining(level, s, layerY, v) > 0) return k;
         }
-        return best;
+        return -1;
     }
 
-    private boolean lastDigStillValid(ClientLevel level, AutoMineSettings s) {
-        return lastDig != null && inArea(s, lastDig) && diggable(level, lastDig, level.getBlockState(lastDig));
+    /** The highest layer at or below {@code from} that still has blocks. */
+    private int findLayer(ClientLevel level, AutoMineSettings s, int from) {
+        for (int y = from; y >= s.minY(); y--) if (layerRemaining(level, s, y) > 0) return y;
+        return NO_LAYER;
     }
 
     private static boolean isNear(LocalPlayer player, BlockPos target) {
@@ -280,17 +342,30 @@ public final class AutoMineController {
         return !state.isAir() && state.getFluidState().isEmpty() && state.getDestroySpeed(level, pos) >= 0;
     }
 
-    /** Blocks still to dig in the area. Unloaded chunks count as unfinished so the job is never declared done early. */
-    private int remaining(ClientLevel level, AutoMineSettings s) {
+    private static boolean unloaded(ClientLevel level, int x, int z) {
+        return level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, false) == null;
+    }
+
+    /** Blocks still to dig in one row. Unloaded chunks count as unfinished so a row is never declared done early. */
+    private int rowRemaining(ClientLevel level, AutoMineSettings s, int y, int v) {
+        int count = 0;
+        for (int u = uMin(s); u <= uMax(s); u++) {
+            BlockPos pos = cellAt(u, v, y);
+            if (unloaded(level, pos.getX(), pos.getZ())) { count++; continue; }
+            if (diggable(level, pos, level.getBlockState(pos))) count++;
+        }
+        return count;
+    }
+
+    /** Blocks still to dig in one layer, with the same rule for unloaded chunks. */
+    private int layerRemaining(ClientLevel level, AutoMineSettings s, int y) {
         int count = 0;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int x = s.minX(); x <= s.maxX(); x++) {
             for (int z = s.minZ(); z <= s.maxZ(); z++) {
-                if (level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, false) == null) { count++; continue; }
-                for (int y = s.minY(); y <= s.maxY(); y++) {
-                    pos.set(x, y, z);
-                    if (diggable(level, pos, level.getBlockState(pos))) count++;
-                }
+                if (unloaded(level, x, z)) { count++; continue; }
+                pos.set(x, y, z);
+                if (diggable(level, pos, level.getBlockState(pos))) count++;
             }
         }
         return count;
