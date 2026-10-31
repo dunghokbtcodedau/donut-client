@@ -29,11 +29,14 @@ public final class BuilderNavigator {
     private final Set<BuilderPathfinder.Cell> blocked = new HashSet<>();
     /** Routes never use cells with lava in or beside them. */
     public boolean avoidLava = true;
+    /** Allow sprint jumps across 1-2 block gaps. */
+    public boolean parkour = true;
+    private boolean gapJumping;
 
     private static final class SteeringInput extends ClientInput {
-        boolean forward, jump, sneak;
+        boolean forward, jump, sneak, sprint;
         @Override public void tick() {
-            keyPresses = new Input(forward, false, false, false, jump, sneak, false);
+            keyPresses = new Input(forward, false, false, false, jump, sneak, sprint);
             moveVector = forward ? new Vec2(0, 1) : Vec2.ZERO;
         }
         @Override public void makeJump() { if (forward) super.makeJump(); }
@@ -44,7 +47,7 @@ public final class BuilderNavigator {
         if (owner != client.player) {
             release(); owner = client.player; saved = owner.input; owner.input = steering;
         }
-        steering.forward = false; steering.jump = false; steering.sneak = sneak; steering.tick();
+        steering.forward = false; steering.jump = false; steering.sneak = sneak; steering.sprint = false; steering.tick();
     }
 
     /** Stand still for this tick and press the jump key (used when climbing on temporary blocks). */
@@ -56,8 +59,8 @@ public final class BuilderNavigator {
 
     public void release() {
         if (owner != null && owner.input == steering && saved != null) owner.input = saved;
-        owner = null; saved = null; steering.forward = false; steering.jump = false; steering.sneak = false;
-        route = List.of(); index = 0; stalled = 0; lastPosition = null;
+        owner = null; saved = null; steering.forward = false; steering.jump = false; steering.sneak = false; steering.sprint = false;
+        route = List.of(); index = 0; stalled = 0; lastPosition = null; gapJumping = false;
     }
     public void replan() { route = List.of(); index = 0; stalled = 0; lastPosition = null; }
     public void reset() { release(); target = null; rejectedGoals.clear(); blocked.clear(); }
@@ -80,10 +83,10 @@ public final class BuilderNavigator {
         BuilderPathfinder.Cell feet = cell(client.player.blockPosition());
         if (goal(client, feet, destination)) return Result.ARRIVED;
         if (route.isEmpty() || index >= route.size()) {
-            route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, false), at -> goal(client, at, destination), 6000, 96);
+            route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, false), at -> goal(client, at, destination), 6000, 96, parkour);
             // No way round with the full lava margin: accept cells that only stand beside lava (the player sneaks there).
             if (route.isEmpty() && avoidLava) {
-                route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, true), at -> goal(client, at, destination), 6000, 96);
+                route = BuilderPathfinder.find(feet, cell(destination), makeTerrain(client, true), at -> goal(client, at, destination), 6000, 96, parkour);
             }
             index = 0;
             if (route.isEmpty()) return Result.NO_PATH;
@@ -100,12 +103,21 @@ public final class BuilderNavigator {
         client.player.setXRot(10);
         steering.forward = true;
         steering.jump = next.y() > client.player.getY()+.25 && client.player.onGround();
+        // Parkour: the next cell is 2-3 cells away in a straight line (a gap). Run up to the edge, then sprint-jump.
+        int gx = next.x() - feet.x(), gz = next.z() - feet.z();
+        boolean gap = parkour && (gx == 0 || gz == 0) && Math.max(Math.abs(gx), Math.abs(gz)) >= 2;
+        if (gap) {
+            double along = (client.player.getX() - (feet.x() + .5)) * Integer.signum(gx) + (client.player.getZ() - (feet.z() + .5)) * Integer.signum(gz);
+            steering.jump = client.player.onGround() && along >= .3;
+            if (steering.jump) gapJumping = true;
+        } else if (client.player.onGround()) gapJumping = false;
+        steering.sprint = gap || (gapJumping && !client.player.onGround());
         // Squeezing past a lava corner: hop so the body clears the lava surface instead of brushing it.
         boolean cornerHop = false;
         if (!steering.jump && client.player.onGround() && lavaCornerStep(client, next)) { steering.jump = true; cornerHop = true; }
         // Within half a block of lava: hold shift so the player cannot slip over an edge. Not while hopping a lava
         // corner (sneaking would cut the hop short) and not when the next step is a drop (sneaking refuses drops).
-        steering.sneak = !cornerHop && next.y() >= client.player.blockPosition().getY() && lavaWithinHalfBlock(client);
+        steering.sneak = !cornerHop && !gap && !gapJumping && next.y() >= client.player.blockPosition().getY() && lavaWithinHalfBlock(client);
         if (lastPosition != null && client.player.position().distanceToSqr(lastPosition) < .0004) stalled++;
         else stalled = 0;
         lastPosition = client.player.position();
@@ -155,6 +167,12 @@ public final class BuilderNavigator {
                             || ground.is(Blocks.CACTUS) || ground.is(Blocks.POWDER_SNOW)
                             || !ground.isCollisionShapeFullBlock(client.level, pos.below())) return false;
                     return headroom(at);
+                }
+                @Override public boolean clear(BuilderPathfinder.Cell at) {
+                    BlockPos pos = pos(at);
+                    if (!MaterialTracker.isLoaded(client.level,pos)) return false;
+                    if (avoidLava && LavaGuard.lava(client.level, pos)) return false;
+                    return client.level.noCollision(client.player, new AABB(at.x()+.2, at.y()+.01, at.z()+.2, at.x()+.8, at.y()+1.0, at.z()+.8));
                 }
                 @Override public boolean headroom(BuilderPathfinder.Cell at) {
                     BlockPos pos = pos(at);

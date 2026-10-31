@@ -84,6 +84,8 @@ public final class AutoBuilderController {
     private static final class Pillar {
         final Target goal; final int started;
         BlockPos base; boolean airborne, placedThisJump; int failed;
+        /** Real schematic block to place under the feet while climbing; null means a temporary cobbled-deepslate support. */
+        Target main;
         Pillar(Target goal, int started) { this.goal = goal; this.started = started; }
     }
 
@@ -443,6 +445,7 @@ public final class AutoBuilderController {
         cleanup.reset(client);
         finalCheckIndex=0;
         navigator.minStandY=settings.alwaysAbove && !relaxAbove && layerY!=Integer.MIN_VALUE ? layerY+1 : Integer.MIN_VALUE;
+        navigator.parkour=settings.parkour;
         if (pillar != null && pillarTick(client)) return;
         if (current == null) { relaxAbove=false; current=chooseTarget(client); }
         if (wrap != Wrap.NONE) { current=null; return; } // a layer just ended: wrap it up first
@@ -816,8 +819,13 @@ public final class AutoBuilderController {
             if (LavaGuard.plannedOnLayer(new BlockPos(feet.getX(),p.goal.pos.getY(),feet.getZ()))) { giveUpClimbing(p,"Lava will be placed at the climbing spot"); return true; }
             if (!client.level.noCollision(player,player.getBoundingBox().expandTowards(0,1.3,0))
                     || !client.level.getBlockState(feet).canBeReplaced()) { giveUpClimbing(p,"No room to climb"); return true; }
-            int slot=findSlot(client,SCAFFOLD);
-            if (slot<0) { pillar=null; pauseWith("Missing " + SCAFFOLD.getName().getString() + " for climbing. Add materials, then Resume."); return true; }
+            // The block under the feet is the schematic's own block when the schematic has a simple full block in
+            // that cell; the temporary support is only used where the schematic has nothing (or nothing placeable).
+            p.main=mainBlockFor(client,feet);
+            Item item=p.main!=null ? MaterialTracker.requirement(p.main.state()).item() : SCAFFOLD;
+            int slot=findSlot(client,item);
+            if (slot<0 && p.main!=null) { p.main=null; item=SCAFFOLD; slot=findSlot(client,item); }
+            if (slot<0) { pillar=null; pauseWith("Missing " + item.getName().getString() + " for climbing. Add materials, then Resume."); return true; }
             if (slot>=9) {
                 int selected=player.getInventory().getSelectedSlot();
                 client.gameMode.handleInventoryMouseClick(player.inventoryMenu.containerId,slot,selected,ClickType.SWAP,player);
@@ -835,15 +843,28 @@ public final class AutoBuilderController {
         p.airborne=true;
         if (p.base==null || p.placedThisJump || player.getY()<p.base.getY()+1.0) return true;
         BlockState scaffold=Blocks.COBBLED_DEEPSLATE.defaultBlockState();
+        BlockState placed=p.main!=null ? p.main.state() : scaffold;
         if (!client.level.getBlockState(p.base).canBeReplaced()) return true;
-        var plan=PlacementPlanner.plan(client,p.base,scaffold,player.getMainHandItem());
+        var plan=PlacementPlanner.plan(client,p.base,placed,player.getMainHandItem());
         if (plan==null) return true;
-        current=new Target(p.base,scaffold,-1,true);
+        current=p.main!=null ? p.main : new Target(p.base,scaffold,-1,true);
         plan=pillarAim(client,plan);
         prepared=new Prepared(current,plan,tick+1);
         p.placedThisJump=true;
-        reason="Climbing: placing a block at " + coordinates(p.base);
+        reason="Climbing: placing " + (p.main!=null ? "schematic block" : "a support") + " at " + coordinates(p.base);
         return true;
+    }
+
+    /** The schematic's own block for a cell under the feet, only when it is a plain full block that a top-face placement gets right. */
+    private Target mainBlockFor(Minecraft client,BlockPos pos) {
+        Integer index=indices.get(pos);
+        if (index==null || skipped.get(index) || correct.get(index) || unconfirmed.containsKey(pos)) return null;
+        Target target=byIndex[index];
+        BlockState state=target.state();
+        if (!state.getProperties().isEmpty() || state.getBlock() instanceof net.minecraft.world.level.block.FallingBlock
+                || !state.getFluidState().isEmpty() || MaterialTracker.isSecondary(state)
+                || !state.isCollisionShapeFullBlock(client.level,pos)) return null;
+        return MaterialTracker.requirement(state).item() instanceof BlockItem ? target : null;
     }
 
     private void giveUpClimbing(Pillar p,String message) {
@@ -853,7 +874,7 @@ public final class AutoBuilderController {
 
     /** A support under the feet needs no particular look point, so keep the yaw and keep looking straight down. */
     private PlacementPlanner.Plan pillarAim(Minecraft client,PlacementPlanner.Plan plan) {
-        if (pillar==null || current==null || !current.support || plan.hit().getDirection()!=Direction.UP) return plan;
+        if (pillar==null || current==null || pillar.base==null || !current.pos.equals(pillar.base) || plan.hit().getDirection()!=Direction.UP) return plan;
         return new PlacementPlanner.Plan(plan.hit(),plan.prediction(),client.player.getYRot(),90f,false);
     }
 
@@ -920,7 +941,7 @@ public final class AutoBuilderController {
         var plan=PlacementPlanner.plan(client,current.pos,current.state,client.player.getMainHandItem());
         if (plan==null) {
             // Climbing: the jump window passed, go back to jumping instead of replanning a walk.
-            if (pillar!=null && current.support) { current=null; return; }
+            if (pillar!=null && pillar.base!=null && current.pos.equals(pillar.base)) { current=null; return; }
             navigator.rejectCurrent(client); return;
         }
         plan=pillarAim(client,plan);

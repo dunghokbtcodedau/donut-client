@@ -15,12 +15,20 @@ public final class BuilderPathfinder {
         boolean headroom(Cell cell);
         /** A diagonal step on the same level; corner cells are the two cells the step cuts across. */
         default boolean standableDiagonal(Cell from, Cell to) { return standable(to); }
+        /** Free body space for flying through this cell during a jump across a gap (no ground needed). */
+        default boolean clear(Cell cell) { return true; }
     }
     private record Entry(Cell cell, double score) { }
     private BuilderPathfinder() { }
 
     public static List<Cell> find(Cell start, Cell target, Terrain terrain, Predicate<Cell> goal,
                                   int maxVisited, int maxDistance) {
+        return find(start, target, terrain, goal, maxVisited, maxDistance, false);
+    }
+
+    /** With parkour, routes may also jump straight across a gap of 1 or 2 cells (sprint jump). */
+    public static List<Cell> find(Cell start, Cell target, Terrain terrain, Predicate<Cell> goal,
+                                  int maxVisited, int maxDistance, boolean parkour) {
         PriorityQueue<Entry> open = new PriorityQueue<>(Comparator.comparingDouble(Entry::score));
         Map<Cell, Double> costs = new HashMap<>();
         Map<Cell, Cell> previous = new HashMap<>();
@@ -51,6 +59,30 @@ public final class BuilderPathfinder {
                     previous.put(next, current);
                     // Reach is a region around target. Subtracting its radius keeps this admissible.
                     open.add(new Entry(next, cost + Math.max(0, next.distance(target) - 4)));
+                }
+            }
+            if (!parkour) continue;
+            for (int[] axis : axes) {
+                if (axis[0] != 0 && axis[1] != 0) continue; // straight jumps only
+                for (int length = 2; length <= 3; length++) {
+                    for (int dy : new int[]{0, -1, 1}) {
+                        if (dy == 1 && length > 2) continue;
+                        Cell next = current.offset(axis[0] * length, dy, axis[1] * length);
+                        if (Math.abs(next.x-start.x) > maxDistance || Math.abs(next.z-start.z) > maxDistance
+                                || Math.abs(next.y-start.y) > 24 || closed.contains(next) || !terrain.standable(next)) continue;
+                        if (!terrain.headroom(current.offset(0, 1, 0))) continue;
+                        boolean free = true;
+                        for (int k = 1; k < length && free; k++) {
+                            Cell mid = current.offset(axis[0] * k, dy > 0 ? 1 : 0, axis[1] * k);
+                            free = terrain.clear(mid) && terrain.clear(mid.offset(0, 1, 0));
+                        }
+                        if (!free) continue;
+                        double cost = costs.get(current) + length + 2.5 + (dy != 0 ? .3 : 0); // walking is always preferred
+                        if (cost >= costs.getOrDefault(next, Double.POSITIVE_INFINITY)) continue;
+                        costs.put(next, cost);
+                        previous.put(next, current);
+                        open.add(new Entry(next, cost + Math.max(0, next.distance(target) - 4)));
+                    }
                 }
             }
         }
