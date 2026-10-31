@@ -73,4 +73,16 @@ class BuilderProgressStoreTest {
         assertNull(store.load("none", 8));
         assertEquals("{not json", Files.readString(file));
     }
+
+    @Test void deleteRemovesTheProgressFileButKeepsBackups() throws IOException {
+        var store = new BuilderProgressStore(directory);
+        store.save(snapshot(10, 10, -5));
+        store.save(snapshot(500, 500, -5));
+        store.delete("My Tower!.litematic", 8);
+        assertNull(store.load("My Tower!.litematic", 8));
+        try (var files = Files.list(directory)) {
+            assertEquals(1, files.filter(p -> p.getFileName().toString().contains(".backup-")).count());
+        }
+        store.delete("My Tower!.litematic", 8); // already gone: no error
+    }
 }
